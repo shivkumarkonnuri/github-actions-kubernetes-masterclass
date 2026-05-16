@@ -7,6 +7,11 @@ on:
       - 'k8s/**'
       - 'docs/**'
       - '**/*.md'
+
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
 
   code-quality:
