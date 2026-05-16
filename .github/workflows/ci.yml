@@ -16,7 +16,7 @@ jobs:
     uses: ./.github/workflows/secrets-scan.yml
 
   dependency-scan:
-    uses: ./.github/workflows/dependencies-scan.yml
+    uses: ./.github/workflows/dependency-scan.yml
     secrets: inherit
 
   docker-lint:
