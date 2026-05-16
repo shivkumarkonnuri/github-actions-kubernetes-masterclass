@@ -1,0 +1,30 @@
+name: "Docker Lint"
+
+on: 
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  hadolint:
+    name: Dockerfile lint (Hadolint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Hadolint — backend Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: backend/Dockerfile
+          failure-threshold: warning
+
+      - name: Hadolint — frontend Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: frontend/Dockerfile
+          failure-threshold: warning
+
