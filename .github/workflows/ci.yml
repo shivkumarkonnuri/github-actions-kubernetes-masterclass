@@ -31,3 +31,5 @@ jobs:
     needs: [docker-build-push]
     uses: ./.github/workflows/docker-image-scan.yml
     secrets: inherit
+    with:
+      image_tag: ${{ github.sha }}

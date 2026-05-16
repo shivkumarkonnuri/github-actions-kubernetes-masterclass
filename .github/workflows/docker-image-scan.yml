@@ -2,6 +2,13 @@ name: "Docker Image Scan"
 
 on:
   workflow_call:
+    inputs:
+      image_tag:
+        required: true
+        type: string
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
 
 permissions:
   contents: read
@@ -15,31 +22,21 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+      # Pull the exact SHA-tagged images built by docker-build-push job
+      - name: Pull backend image from DockerHub
+        run: docker pull ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-backend:${{ inputs.image_tag }}
  
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Pull frontend image from DockerHub
+        run: docker pull ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-frontend:${{ inputs.image_tag }}
  
-      # Re-load images from GHA cache — no second DockerHub pull needed
-      - name: Load backend image from cache
-        uses: docker/build-push-action@v6
-        with:
-          context: ./backend
-          push: false
-          load: true
-          tags: skillpulse-backend:scan
-          cache-from: type=gha,scope=backend
- 
-      - name: Load frontend image from cache
-        uses: docker/build-push-action@v6
-        with:
-          context: ./frontend
-          push: false
-          load: true
-          tags: skillpulse-frontend:scan
-          cache-from: type=gha,scope=frontend
+      # Tag with short name so trivy-action refs are clean
+      - name: Tag images for scanning
+        run: |
+          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-backend:${{ inputs.image_tag }}  skillpulse-backend:scan
+          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-frontend:${{ inputs.image_tag }} skillpulse-frontend:scan
  
       # ── Backend scan ──────────────────────────────────────────────────────
-      - name: Trivy — backend (table, fails on CRITICAL/HIGH)
+      - name: Trivy - backend (table, fails on CRITICAL/HIGH)
         uses: aquasecurity/trivy-action@0.30.0
         with:
           image-ref: skillpulse-backend:scan
@@ -48,9 +45,8 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
  
-      - name: Trivy — backend (SARIF → GitHub Security tab)
+      - name: Trivy - backend (SARIF to GitHub Security tab)
         uses: aquasecurity/trivy-action@0.30.0
-        # always() ensures report is uploaded even if the table scan fails
         if: always()
         with:
           image-ref: skillpulse-backend:scan
@@ -67,7 +63,7 @@ jobs:
           category: trivy-backend
  
       # ── Frontend scan ─────────────────────────────────────────────────────
-      - name: Trivy — frontend (table, fails on CRITICAL/HIGH)
+      - name: Trivy - frontend (table, fails on CRITICAL/HIGH)
         uses: aquasecurity/trivy-action@0.30.0
         with:
           image-ref: skillpulse-frontend:scan
@@ -76,7 +72,7 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
  
-      - name: Trivy — frontend (SARIF → GitHub Security tab)
+      - name: Trivy - frontend (SARIF to GitHub Security tab)
         uses: aquasecurity/trivy-action@0.30.0
         if: always()
         with:
@@ -91,4 +87,4 @@ jobs:
         if: always()
         with:
           sarif_file: trivy-frontend.sarif
-          category: trivy-frontend
+          category: trivy-frontend 

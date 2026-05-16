@@ -3,10 +3,6 @@ name: "Code Quality"
 on:
   workflow_call:
 
-concurrency:
-  group: code-quality-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
 

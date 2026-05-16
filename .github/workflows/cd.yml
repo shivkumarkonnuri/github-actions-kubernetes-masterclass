@@ -1,146 +1,103 @@
-name: "Deploy to kind cluster (EC2)"
-
+name: "CD - Docker Deploy"
+ 
 on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
-    branches: [main]
-
+ 
 permissions:
   contents: read
-
+ 
 jobs:
-  deploy-kind:
-    name: Deploy to kind on EC2
+  docker-deploy:
+    name: Deploy via Docker Compose on EC2
     if: |
       github.event.workflow_run.conclusion == 'success' &&
       vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 15
     environment: production
-
+ 
     steps:
-      # ── 1. Checkout — needed to scp k8s manifests to EC2 ─────────────────
+      # ── 1. Checkout — needed to scp docker-compose.yml to EC2 ────────────
       - name: Checkout code
         uses: actions/checkout@v4
-
-      # ── 2. Copy k8s manifests to EC2 ─────────────────────────────────────
-      #    rsync the k8s/ folder so EC2 always has the latest manifests.
-      #    Ansible installs the tools; this step delivers the config.
-      - name: Copy k8s manifests to EC2
+ 
+      # ── 2. Copy docker-compose.yml to EC2 ────────────────────────────────
+      - name: Copy docker-compose.yml to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
           host:     ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key:      ${{ secrets.EC2_SSH_KEY }}
-          source:   "k8s/"
+          source:   "docker-compose.yml"
           target:   "~/skillpulse"
-
-      # ── 3. SSH into EC2 and run the full deploy ───────────────────────────
-      - name: Deploy kind cluster on EC2
+ 
+      # ── 3. SSH into EC2 — pull exact SHA images and deploy ────────────────
+      - name: Deploy via Docker Compose
         uses: appleboy/ssh-action@v1
         env:
-          IMAGE_TAG:           ${{ github.event.workflow_run.head_sha }}
-          DOCKER_USER:         ${{ secrets.DOCKERHUB_USERNAME }}
-          MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
-          MYSQL_DATABASE:      ${{ secrets.MYSQL_DATABASE }}
-          MYSQL_USER:          ${{ secrets.MYSQL_USER }}
-          MYSQL_PASSWORD:      ${{ secrets.MYSQL_PASSWORD }}
+          IMAGE_TAG:            ${{ github.event.workflow_run.head_sha }}
+          DOCKERHUB_USERNAME:   ${{ secrets.DOCKERHUB_USERNAME }}
+          MYSQL_ROOT_PASSWORD:  ${{ secrets.MYSQL_ROOT_PASSWORD }}
+          DB_NAME:              ${{ secrets.MYSQL_DATABASE }}
+          DB_USER:              ${{ secrets.MYSQL_USER }}
+          DB_PASSWORD:          ${{ secrets.MYSQL_PASSWORD }}
         with:
           host:     ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key:      ${{ secrets.EC2_SSH_KEY }}
-          envs:     IMAGE_TAG,DOCKER_USER,MYSQL_ROOT_PASSWORD,MYSQL_DATABASE,MYSQL_USER,MYSQL_PASSWORD
-          command_timeout: 25m
+          envs:     IMAGE_TAG,DOCKERHUB_USERNAME,MYSQL_ROOT_PASSWORD,DB_NAME,DB_USER,DB_PASSWORD
+          command_timeout: 12m
           script: |
             set -euo pipefail
-
-            CLUSTER=skillpulse
-            NAMESPACE=skillpulse
-            K8S_DIR=~/skillpulse/k8s
-
+ 
+            APP_DIR=~/skillpulse
+            cd "$APP_DIR"
+ 
             echo "=== Image tag: ${IMAGE_TAG} ==="
-
-            # 1. Delete existing cluster — clean slate every deploy
-            if kind get clusters 2>/dev/null | grep -q "^${CLUSTER}$"; then
-              echo "Deleting existing kind cluster..."
-              kind delete cluster --name "$CLUSTER"
-            fi
-
-            # 2. Create fresh 3-node cluster from your kind-config.yaml
-            echo "Creating kind cluster..."
-            kind create cluster \
-              --config "${K8S_DIR}/kind-config.yaml" \
-              --name "$CLUSTER" \
-              --wait 60s
-            kubectl get nodes
-
-            # 3. Pull exact SHA images from DockerHub into Docker daemon
+ 
+            # ── 1. Write .env from GitHub Secrets ────────────────────────────
+            # Never stored in git — written fresh on every deploy
+            cat > .env <<EOF
+            DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME}
+            MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+            DB_HOST=db
+            DB_PORT=3306
+            DB_USER=${DB_USER}
+            DB_PASSWORD=${DB_PASSWORD}
+            DB_NAME=${DB_NAME}
+            EOF
+ 
+            # ── 2. Pin compose to exact SHA built and scanned by CI ──────────
+            export BACKEND_IMAGE="${DOCKERHUB_USERNAME}/skillpulse-backend:${IMAGE_TAG}"
+            export FRONTEND_IMAGE="${DOCKERHUB_USERNAME}/skillpulse-frontend:${IMAGE_TAG}"
+ 
+            # Override image tags in compose without editing the file
+            export COMPOSE_BACKEND_IMAGE="$BACKEND_IMAGE"
+            export COMPOSE_FRONTEND_IMAGE="$FRONTEND_IMAGE"
+ 
+            # ── 3. Pull exact images ─────────────────────────────────────────
             echo "Pulling images..."
-            docker pull "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}"
-            docker pull "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}"
-
-            # 4. Load images into every kind node
-            echo "Loading images into kind nodes..."
-            kind load docker-image \
-              "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}" \
-              --name "$CLUSTER"
-
-            kind load docker-image \
-              "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" \
-              --name "$CLUSTER"
-
-            echo "Images in kind nodes:"
-            docker exec "${CLUSTER}-control-plane" crictl images 2>/dev/null || true
-
-            # 5. Pin manifests to exact SHA
-            sed -i \
-              "s|image: .*/skillpulse-backend:.*|image: ${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}|" \
-              "${K8S_DIR}/20-backend.yaml"
-            sed -i \
-              "s|image: .*/skillpulse-frontend:.*|image: ${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}|" \
-              "${K8S_DIR}/30-frontend.yaml"
-            grep "image:" "${K8S_DIR}/20-backend.yaml" "${K8S_DIR}/30-frontend.yaml"
-
-            # 6. Create namespace
-            kubectl apply -f "${K8S_DIR}/00-namespace.yaml"
-
-            # 7. Inject DB secret from env vars — bypasses plaintext yaml
-            kubectl create secret generic skillpulse-db \
-              --namespace="$NAMESPACE" \
-              --from-literal=MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
-              --from-literal=MYSQL_DATABASE="$MYSQL_DATABASE" \
-              --from-literal=MYSQL_USER="$MYSQL_USER" \
-              --from-literal=MYSQL_PASSWORD="$MYSQL_PASSWORD" \
-              --save-config \
-              --dry-run=client -o yaml | kubectl apply -f -
-
-            # 8. Apply all manifests
-            kubectl apply \
-              -f "${K8S_DIR}/10-mysql.yaml" \
-              -f "${K8S_DIR}/20-backend.yaml" \
-              -f "${K8S_DIR}/30-frontend.yaml"
-
-            # 9. Wait for rollouts
-            echo "Waiting for MySQL..."
-            kubectl rollout status statefulset/mysql \
-              -n "$NAMESPACE" --timeout=180s
-
-            echo "Waiting for backend..."
-            kubectl rollout status deployment/backend \
-              -n "$NAMESPACE" --timeout=120s
-
-            echo "Waiting for frontend..."
-            kubectl rollout status deployment/frontend \
-              -n "$NAMESPACE" --timeout=60s
-
-            # 10. Health snapshot
-            kubectl get pods,svc,endpoints -n "$NAMESPACE" -o wide
-
-            # 11. Smoke test — frontend via NodePort :8888
+            docker pull "$BACKEND_IMAGE"
+            docker pull "$FRONTEND_IMAGE"
+ 
+            # Tag as :latest so docker-compose.yml image refs resolve correctly
+            docker tag "$BACKEND_IMAGE"  "${DOCKERHUB_USERNAME}/skillpulse-backend:latest"
+            docker tag "$FRONTEND_IMAGE" "${DOCKERHUB_USERNAME}/skillpulse-frontend:latest"
+ 
+            # ── 4. Save old container IDs for rollback ───────────────────────
+            PREV_BACKEND=$(docker ps -q  --filter "name=skillpulse-backend"  2>/dev/null || true)
+            PREV_FRONTEND=$(docker ps -q --filter "name=skillpulse-frontend" 2>/dev/null || true)
+ 
+            # ── 5. Bring up new containers ───────────────────────────────────
+            echo "Starting containers..."
+            docker compose up -d --remove-orphans
+ 
+            # ── 6. Smoke test — frontend on port 80 ──────────────────────────
             echo "=== Smoke test: frontend ==="
             for i in $(seq 1 6); do
-              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8888 || true)
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80 || true)
               if [ "$STATUS" = "200" ]; then
                 echo "Frontend passed (attempt $i) — HTTP $STATUS"
                 break
@@ -148,35 +105,34 @@ jobs:
               echo "Attempt $i: HTTP $STATUS — retrying in 5s..."
               sleep 5
               if [ "$i" = "6" ]; then
-                echo "FRONTEND SMOKE TEST FAILED"
-                kubectl describe pods -n "$NAMESPACE"
-                kubectl logs -n "$NAMESPACE" -l app=frontend --tail=50
+                echo "FRONTEND SMOKE TEST FAILED — rolling back"
+                docker compose down --remove-orphans
+                [ -n "$PREV_BACKEND"  ] && docker start "$PREV_BACKEND"  || true
+                [ -n "$PREV_FRONTEND" ] && docker start "$PREV_FRONTEND" || true
                 exit 1
               fi
             done
-
-            # 12. Smoke test — backend via port-forward
+ 
+            # ── 7. Smoke test — backend /health on port 8080 ─────────────────
             echo "=== Smoke test: backend /health ==="
-            kubectl port-forward svc/backend 8080:8080 -n "$NAMESPACE" &
-            PF_PID=$!
-            sleep 3
-
             for i in $(seq 1 6); do
               STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health || true)
               if [ "$STATUS" = "200" ]; then
                 echo "Backend passed (attempt $i) — HTTP $STATUS"
-                kill "$PF_PID" 2>/dev/null || true
                 break
               fi
               echo "Attempt $i: HTTP $STATUS — retrying in 5s..."
               sleep 5
               if [ "$i" = "6" ]; then
-                echo "BACKEND SMOKE TEST FAILED"
-                kill "$PF_PID" 2>/dev/null || true
-                kubectl describe pods -n "$NAMESPACE" -l app=backend
-                kubectl logs -n "$NAMESPACE" -l app=backend --tail=50
+                echo "BACKEND SMOKE TEST FAILED — rolling back"
+                docker compose down --remove-orphans
+                [ -n "$PREV_BACKEND"  ] && docker start "$PREV_BACKEND"  || true
+                [ -n "$PREV_FRONTEND" ] && docker start "$PREV_FRONTEND" || true
                 exit 1
               fi
             done
-
-            echo "=== Deploy complete — ${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG} ==="
+ 
+            # ── 8. Clean up dangling images ──────────────────────────────────
+            docker image prune -f
+ 
+            echo "=== Docker deploy complete — ${IMAGE_TAG} ==="

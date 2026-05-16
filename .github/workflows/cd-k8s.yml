@@ -1,44 +1,187 @@
-name: CD (kind cluster — manifest bump)
+name: "CD - kind Cluster Deploy"
 
 on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
-    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
-  bump-manifests:
-    if: ${{ github.event.workflow_run.conclusion == 'success' && vars.DEPLOY_ENABLED == 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+  kind-deploy:
+    name: Deploy to kind cluster on EC2
+    if: |
+      github.event.workflow_run.conclusion == 'success' &&
+      vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+
     steps:
-      - uses: actions/checkout@v4
+      # ── 1. Checkout — needed to scp k8s manifests to EC2 ─────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Copy k8s manifests to EC2 ─────────────────────────────────────
+      - name: Copy k8s manifests to EC2
+        uses: appleboy/scp-action@v0.1.7
         with:
-          ref: main
+          host:     ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          source:   "k8s/"
+          target:   "~/skillpulse"
 
-      - name: Pin backend + frontend images to commit SHA
+      # ── 3. SSH into EC2 — create cluster, load images, deploy ────────────
+      - name: Deploy to kind cluster
+        uses: appleboy/ssh-action@v1
         env:
-          SHA: ${{ github.event.workflow_run.head_sha }}
-          DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
-        run: |
-          if [ -z "$DOCKER_USER" ]; then
-            echo "ERROR: DOCKERHUB_USERNAME secret is not set."
-            exit 1
-          fi
-          sed -i "s|image: ${DOCKER_USER}/skillpulse-backend:.*|image: ${DOCKER_USER}/skillpulse-backend:${SHA}|"  k8s/20-backend.yaml
-          sed -i "s|image: ${DOCKER_USER}/skillpulse-frontend:.*|image: ${DOCKER_USER}/skillpulse-frontend:${SHA}|" k8s/30-frontend.yaml
+          IMAGE_TAG:           ${{ github.event.workflow_run.head_sha }}
+          DOCKER_USER:         ${{ secrets.DOCKERHUB_USERNAME }}
+          MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+          MYSQL_DATABASE:      ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_USER:          ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD:      ${{ secrets.MYSQL_PASSWORD }}
+        with:
+          host:     ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          envs:     IMAGE_TAG,DOCKER_USER,MYSQL_ROOT_PASSWORD,MYSQL_DATABASE,MYSQL_USER,MYSQL_PASSWORD
+          command_timeout: 25m
+          script: |
+            set -euo pipefail
 
-      - name: Commit + push if changed
-        env:
-          SHA: ${{ github.event.workflow_run.head_sha }}
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet; then
-            echo "Manifests already pinned to ${SHA}; nothing to commit."
-            exit 0
-          fi
-          git add k8s/20-backend.yaml k8s/30-frontend.yaml
-          git commit -m "deploy: pin backend+frontend to ${SHA:0:7}"
-          git push
+            CLUSTER=skillpulse
+            NAMESPACE=skillpulse
+            K8S_DIR=~/skillpulse/k8s
+
+            echo "=== Image tag: ${IMAGE_TAG} ==="
+
+            # ── 1. Delete existing cluster — clean slate every deploy ─────────
+            if kind get clusters 2>/dev/null | grep -q "^${CLUSTER}$"; then
+              echo "Deleting existing kind cluster..."
+              kind delete cluster --name "$CLUSTER"
+            fi
+
+            # ── 2. Create fresh 3-node cluster from kind-config.yaml ──────────
+            echo "Creating kind cluster..."
+            kind create cluster \
+              --config "${K8S_DIR}/kind-config.yaml" \
+              --name "$CLUSTER" \
+              --wait 60s
+            kubectl get nodes
+
+            # ── 3. Pull exact SHA images from DockerHub ───────────────────────
+            echo "Pulling images..."
+            docker pull "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}"
+            docker pull "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}"
+
+            # ── 4. Load images into every kind node ───────────────────────────
+            # kind nodes are isolated — they cannot pull from DockerHub at apply time
+            echo "Loading backend image into kind nodes..."
+            kind load docker-image \
+              "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}" \
+              --name "$CLUSTER"
+
+            echo "Loading frontend image into kind nodes..."
+            kind load docker-image \
+              "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" \
+              --name "$CLUSTER"
+
+            echo "Images loaded into kind nodes:"
+            docker exec "${CLUSTER}-control-plane" crictl images 2>/dev/null || true
+
+            # ── 5. Pin manifests to exact SHA ─────────────────────────────────
+            # imagePullPolicy stays IfNotPresent — correct for kind-loaded images
+            sed -i \
+              "s|image: .*/skillpulse-backend:.*|image: ${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}|" \
+              "${K8S_DIR}/20-backend.yaml"
+            sed -i \
+              "s|image: .*/skillpulse-frontend:.*|image: ${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}|" \
+              "${K8S_DIR}/30-frontend.yaml"
+
+            echo "Pinned image tags:"
+            grep "image:" "${K8S_DIR}/20-backend.yaml" "${K8S_DIR}/30-frontend.yaml"
+
+            # ── 6. Create namespace ───────────────────────────────────────────
+            kubectl apply -f "${K8S_DIR}/00-namespace.yaml"
+
+            # ── 7. Inject DB secret from env — bypasses plaintext yaml ────────
+            # --dry-run=client | kubectl apply makes this idempotent
+            kubectl create secret generic skillpulse-db \
+              --namespace="$NAMESPACE" \
+              --from-literal=MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
+              --from-literal=MYSQL_DATABASE="$MYSQL_DATABASE" \
+              --from-literal=MYSQL_USER="$MYSQL_USER" \
+              --from-literal=MYSQL_PASSWORD="$MYSQL_PASSWORD" \
+              --save-config \
+              --dry-run=client -o yaml | kubectl apply -f -
+
+            # ── 8. Apply all manifests ────────────────────────────────────────
+            kubectl apply \
+              -f "${K8S_DIR}/10-mysql.yaml" \
+              -f "${K8S_DIR}/20-backend.yaml" \
+              -f "${K8S_DIR}/30-frontend.yaml"
+
+            # ── 9. Wait for rollouts ──────────────────────────────────────────
+            echo "Waiting for MySQL StatefulSet..."
+            kubectl rollout status statefulset/mysql \
+              -n "$NAMESPACE" --timeout=180s
+
+            echo "Waiting for backend Deployment..."
+            kubectl rollout status deployment/backend \
+              -n "$NAMESPACE" --timeout=120s
+
+            echo "Waiting for frontend Deployment..."
+            kubectl rollout status deployment/frontend \
+              -n "$NAMESPACE" --timeout=60s
+
+            # ── 10. Health snapshot ───────────────────────────────────────────
+            kubectl get pods,svc,endpoints -n "$NAMESPACE" -o wide
+
+            # ── 11. Smoke test — frontend via NodePort :8888 ──────────────────
+            # kind-config.yaml maps containerPort 30080 → hostPort 8888
+            echo "=== Smoke test: frontend ==="
+            for i in $(seq 1 6); do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8888 || true)
+              if [ "$STATUS" = "200" ]; then
+                echo "Frontend passed (attempt $i) — HTTP $STATUS"
+                break
+              fi
+              echo "Attempt $i: HTTP $STATUS — retrying in 5s..."
+              sleep 5
+              if [ "$i" = "6" ]; then
+                echo "FRONTEND SMOKE TEST FAILED"
+                kubectl describe pods -n "$NAMESPACE"
+                kubectl logs -n "$NAMESPACE" -l app=frontend --tail=50
+                exit 1
+              fi
+            done
+
+            # ── 12. Smoke test — backend /health via port-forward ─────────────
+            echo "=== Smoke test: backend /health ==="
+            kubectl port-forward svc/backend 8080:8080 -n "$NAMESPACE" &
+            PF_PID=$!
+            sleep 3
+
+            for i in $(seq 1 6); do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health || true)
+              if [ "$STATUS" = "200" ]; then
+                echo "Backend passed (attempt $i) — HTTP $STATUS"
+                kill "$PF_PID" 2>/dev/null || true
+                break
+              fi
+              echo "Attempt $i: HTTP $STATUS — retrying in 5s..."
+              sleep 5
+              if [ "$i" = "6" ]; then
+                echo "BACKEND SMOKE TEST FAILED"
+                kill "$PF_PID" 2>/dev/null || true
+                kubectl describe pods -n "$NAMESPACE" -l app=backend
+                kubectl logs -n "$NAMESPACE" -l app=backend --tail=50
+                exit 1
+              fi
+            done
+
+            # ── 13. Debug dump on failure ─────────────────────────────────────
+            echo "=== kind cluster deploy complete — ${IMAGE_TAG} ==="
