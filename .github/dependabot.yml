@@ -1,0 +1,52 @@
+version: 2
+updates:
+  # GitHub Actions — pins action versions like actions/checkout@v4
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    groups:
+      actions:
+        patterns: ["*"]
+    labels:
+      - "dependabot"
+      - "github-actions"
+
+  # Go modules — backend dependencies
+  - package-ecosystem: gomod
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    labels:
+      - "dependabot"
+      - "go"
+
+  # Docker — backend base image (golang, alpine)
+  - package-ecosystem: docker
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    labels:
+      - "dependabot"
+      - "docker"
+
+  # Docker — frontend base image (nginx)
+  - package-ecosystem: docker
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    labels:
+      - "dependabot"
+      - "docker"

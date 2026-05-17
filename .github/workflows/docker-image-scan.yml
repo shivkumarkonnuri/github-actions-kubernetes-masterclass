@@ -15,12 +15,11 @@ permissions:
   security-events: write
 
 jobs:
-  # ── Backend scan ───────────────────────────────────────────────────────────
+  # ── Backend scan + SBOM ────────────────────────────────────────────────────
   trivy-scan-backend:
-    name: Image vulnerability scan — Backend (Trivy)
-    runs-on: ubuntu-latest
+    name: Image scan + SBOM — Backend
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -30,7 +29,9 @@ jobs:
 
       - name: Tag image for scanning
         run: |
-          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-backend:${{ inputs.image_tag }} skillpulse-backend:scan
+          docker tag \
+            ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-backend:${{ inputs.image_tag }} \
+            skillpulse-backend:scan
 
       - name: Trivy — backend (table, fails on CRITICAL/HIGH)
         uses: aquasecurity/trivy-action@v0.35.0
@@ -58,12 +59,29 @@ jobs:
           sarif_file: trivy-backend.sarif
           category: trivy-backend
 
-  # ── Frontend scan ──────────────────────────────────────────────────────────
-  trivy-scan-frontend:
-    name: Image vulnerability scan — Frontend (Trivy)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+      # ── SBOM — Item 1 ──────────────────────────────────────────────────────
+      # Generates a full Software Bill of Materials (SPDX format)
+      # Required for SLSA/SOC2 supply chain compliance
+      - name: Generate SBOM — backend (Syft)
+        uses: anchore/sbom-action@v0
+        with:
+          image: skillpulse-backend:scan
+          artifact-name: sbom-backend.spdx
+          output-file: sbom-backend.spdx
+          format: spdx-json
 
+      - name: Upload backend SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-backend-${{ inputs.image_tag }}
+          path: sbom-backend.spdx
+          retention-days: 90
+
+  # ── Frontend scan + SBOM ───────────────────────────────────────────────────
+  trivy-scan-frontend:
+    name: Image scan + SBOM — Frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -73,7 +91,9 @@ jobs:
 
       - name: Tag image for scanning
         run: |
-          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-frontend:${{ inputs.image_tag }} skillpulse-frontend:scan
+          docker tag \
+            ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-frontend:${{ inputs.image_tag }} \
+            skillpulse-frontend:scan
 
       - name: Trivy — frontend (table, fails on CRITICAL/HIGH)
         uses: aquasecurity/trivy-action@v0.35.0
@@ -100,3 +120,19 @@ jobs:
         with:
           sarif_file: trivy-frontend.sarif
           category: trivy-frontend
+
+      # ── SBOM — Item 1 ──────────────────────────────────────────────────────
+      - name: Generate SBOM — frontend (Syft)
+        uses: anchore/sbom-action@v0
+        with:
+          image: skillpulse-frontend:scan
+          artifact-name: sbom-frontend.spdx
+          output-file: sbom-frontend.spdx
+          format: spdx-json
+
+      - name: Upload frontend SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-frontend-${{ inputs.image_tag }}
+          path: sbom-frontend.spdx
+          retention-days: 90

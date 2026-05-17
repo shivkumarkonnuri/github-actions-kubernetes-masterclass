@@ -1,0 +1,215 @@
+---
+# ansible/install-observability.yml
+# Installs Helm + kube-prometheus-stack (Prometheus + Grafana) on EC2
+# Run once after the kind cluster is created by the CD pipeline
+#
+# Usage:
+#   ansible-playbook -i hosts.ini install-observability.yml
+
+- name: Install observability stack on EC2 kind cluster
+  hosts: kind_node
+  become: false          # kubectl and helm run as ubuntu user, not root
+  gather_facts: true
+
+  vars:
+    helm_version:         "v3.17.0"
+    monitoring_namespace: "monitoring"
+    grafana_password:     "{{ lookup('env', 'GRAFANA_PASSWORD') | default('Skillpulse@123', true) }}"
+    cluster_name:         "skillpulse"
+    k8s_dir:              "~/skillpulse/k8s"
+
+  tasks:
+
+    ###########################################################################
+    # 1. Verify kind cluster is running
+    ###########################################################################
+
+    - name: Check kind cluster exists
+      command: kind get clusters
+      register: kind_clusters
+      changed_when: false
+
+    - name: Fail if skillpulse cluster not found
+      fail:
+        msg: >
+          Kind cluster '{{ cluster_name }}' is not running.
+          Run the CD pipeline first to create the cluster.
+      when: cluster_name not in kind_clusters.stdout
+
+    - name: Verify kubectl can reach the cluster
+      command: kubectl get nodes
+      register: kubectl_nodes
+      changed_when: false
+
+    - name: Show cluster nodes
+      debug:
+        msg: "{{ kubectl_nodes.stdout }}"
+
+    ###########################################################################
+    # 2. Install Helm
+    ###########################################################################
+
+    - name: Check if Helm is already installed
+      command: helm version --short
+      register: helm_check
+      changed_when: false
+      failed_when: false
+
+    - name: Download Helm installer
+      get_url:
+        url: "https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3"
+        dest: /tmp/get-helm-3.sh
+        mode: "0700"
+      when: helm_check.rc != 0
+
+    - name: Install Helm
+      command: /tmp/get-helm-3.sh
+      when: helm_check.rc != 0
+
+    - name: Verify Helm installation
+      command: helm version --short
+      register: helm_version_output
+      changed_when: false
+
+    - name: Show Helm version
+      debug:
+        msg: "{{ helm_version_output.stdout }}"
+
+    ###########################################################################
+    # 3. Add Helm repositories
+    ###########################################################################
+
+    - name: Add prometheus-community Helm repo
+      command: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+      changed_when: false
+
+    - name: Update Helm repos
+      command: helm repo update
+      changed_when: false
+
+    ###########################################################################
+    # 4. Create monitoring namespace
+    ###########################################################################
+
+    - name: Create monitoring namespace
+      command: kubectl create namespace {{ monitoring_namespace }}
+      register: ns_result
+      changed_when: ns_result.rc == 0
+      failed_when: >
+        ns_result.rc != 0 and
+        'already exists' not in ns_result.stderr
+
+    ###########################################################################
+    # 5. Install kube-prometheus-stack
+    ###########################################################################
+
+    - name: Check if kube-prometheus-stack is already installed
+      command: helm status prometheus -n {{ monitoring_namespace }}
+      register: helm_status
+      changed_when: false
+      failed_when: false
+
+    - name: Install kube-prometheus-stack
+      command: >
+        helm install prometheus prometheus-community/kube-prometheus-stack
+        --namespace {{ monitoring_namespace }}
+        --set grafana.adminPassword={{ grafana_password }}
+        --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false
+        --set grafana.service.type=ClusterIP
+        --set prometheus.prometheusSpec.retention=7d
+        --set grafana.defaultDashboardsTimezone=Asia/Kolkata
+        --wait
+        --timeout 5m
+      when: helm_status.rc != 0
+
+    - name: Upgrade kube-prometheus-stack (if already installed)
+      command: >
+        helm upgrade prometheus prometheus-community/kube-prometheus-stack
+        --namespace {{ monitoring_namespace }}
+        --set grafana.adminPassword={{ grafana_password }}
+        --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false
+        --set grafana.service.type=ClusterIP
+        --set prometheus.prometheusSpec.retention=7d
+        --set grafana.defaultDashboardsTimezone=Asia/Kolkata
+        --wait
+        --timeout 5m
+      when: helm_status.rc == 0
+
+    ###########################################################################
+    # 6. Wait for all monitoring pods to be ready
+    ###########################################################################
+
+    - name: Wait for Prometheus pods to be ready
+      command: >
+        kubectl rollout status deployment/prometheus-kube-prometheus-operator
+        -n {{ monitoring_namespace }}
+        --timeout=120s
+      changed_when: false
+
+    - name: Wait for Grafana to be ready
+      command: >
+        kubectl rollout status deployment/prometheus-grafana
+        -n {{ monitoring_namespace }}
+        --timeout=120s
+      changed_when: false
+
+    ###########################################################################
+    # 7. Apply SkillPulse ServiceMonitor
+    ###########################################################################
+
+    - name: Apply SkillPulse ServiceMonitor and PrometheusRule
+      command: kubectl apply -f {{ k8s_dir }}/60-monitoring.yaml
+      register: monitor_result
+      changed_when: "'configured' in monitor_result.stdout or 'created' in monitor_result.stdout"
+
+    - name: Show ServiceMonitor apply result
+      debug:
+        msg: "{{ monitor_result.stdout }}"
+
+    ###########################################################################
+    # 8. Verify Prometheus targets
+    ###########################################################################
+
+    - name: Get all monitoring pods
+      command: kubectl get pods -n {{ monitoring_namespace }} -o wide
+      register: monitoring_pods
+      changed_when: false
+
+    - name: Show monitoring pods
+      debug:
+        msg: "{{ monitoring_pods.stdout }}"
+
+    ###########################################################################
+    # 9. Print access instructions
+    ###########################################################################
+
+    - name: Print Grafana access instructions
+      debug:
+        msg: |
+          =====================================================
+          Observability stack installed successfully!
+          =====================================================
+
+          To access Grafana from your LOCAL machine:
+
+          1. On EC2 — run port-forward (in background):
+             kubectl port-forward svc/prometheus-grafana 3000:80 -n {{ monitoring_namespace }} &
+
+          2. On LOCAL machine — create SSH tunnel:
+             ssh -i ~/.ssh/skillpulse-key.pem \
+               -L 3000:localhost:3000 \
+               ubuntu@<EC2_PUBLIC_IP> -N
+
+          3. Open browser:
+             http://localhost:3000
+             Username: admin
+             Password: {{ grafana_password }}
+
+          To access Prometheus:
+          1. On EC2:
+             kubectl port-forward svc/prometheus-operated 9090:9090 -n {{ monitoring_namespace }} &
+          2. SSH tunnel on local:
+             ssh -i ~/.ssh/skillpulse-key.pem -L 9090:localhost:9090 ubuntu@<EC2_PUBLIC_IP> -N
+          3. Open: http://localhost:9090
+
+          =====================================================

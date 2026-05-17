@@ -1,58 +1,75 @@
 name: CI
 
 on:
-  # Run on every PR targeting main — blocks merge until checks pass
   pull_request:
     branches: [main]
     paths-ignore:
-      - 'k8s/**'
       - 'docs/**'
       - '**/*.md'
 
-  # Also run on direct push to main (e.g. after a merge)
   push:
     branches: [main]
     paths-ignore:
-      - 'k8s/**'
       - 'docs/**'
       - '**/*.md'
 
 permissions:
   contents: read
   security-events: write
+  issues: write
 
 jobs:
+  # ── Generate short SHA once — used by all downstream jobs ──────────────────
+  # github.sha is 40 chars. Sliced to 7 for readable image tags.
+  # Example: abc1234 instead of abc1234def5678...
+  prepare:
+    name: Prepare — generate short SHA
+    runs-on: ubuntu-24.04
+    outputs:
+      short_sha: ${{ steps.sha.outputs.short_sha }}
+    steps:
+      - name: Generate short SHA
+        id: sha
+        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
   # ── Static analysis / scan jobs (all run in parallel) ──────────────────────
   code-quality:
+    needs: prepare
     uses: ./.github/workflows/code-quality.yml
 
   secrets-scan:
+    needs: prepare
     uses: ./.github/workflows/secrets-scan.yml
 
   dependency-scan:
+    needs: prepare
     uses: ./.github/workflows/dependency-scan.yml
     secrets: inherit
 
   docker-lint:
+    needs: prepare
     uses: ./.github/workflows/docker-lint.yml
 
-  # ── Unit tests — run in parallel with scans ─────────────────────────────────
+  terraform-scan:
+    needs: prepare
+    uses: ./.github/workflows/terraform-scan.yml
+
   unit-tests:
+    needs: prepare
     uses: ./.github/workflows/unit-tests.yml
 
   # ── Build — only after all quality gates pass ────────────────────────────────
-  # On PRs: build but do NOT push (DEPLOY_ENABLED is only set on main)
   docker-build-push:
-    needs: [code-quality, secrets-scan, dependency-scan, docker-lint, unit-tests]
+    needs: [prepare, code-quality, secrets-scan, dependency-scan, docker-lint, terraform-scan, unit-tests]
     uses: ./.github/workflows/docker_build_push.yml
     secrets: inherit
+    with:
+      image_tag: ${{ needs.prepare.outputs.short_sha }}
 
-  # ── Scan — after build ───────────────────────────────────────────────────────
+  # ── Scan built images ────────────────────────────────────────────────────────
   docker-image-scan:
-    needs: [docker-build-push]
+    needs: [prepare, docker-build-push]
     uses: ./.github/workflows/docker-image-scan.yml
     secrets: inherit
     with:
-      image_tag: ${{ github.sha }}
-
+      image_tag: ${{ needs.prepare.outputs.short_sha }}

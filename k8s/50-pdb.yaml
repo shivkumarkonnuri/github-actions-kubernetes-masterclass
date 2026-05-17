@@ -1,0 +1,26 @@
+---
+# PodDisruptionBudget — Item 3
+# Ensures Kubernetes never evicts the last running pod during node drains
+# or cluster upgrades. minAvailable: 1 means at least 1 pod must stay up.
+# Most impactful when replicas > 1, but good practice even at replicas: 1.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: backend-pdb
+  namespace: skillpulse
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: backend
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend-pdb
+  namespace: skillpulse
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: frontend

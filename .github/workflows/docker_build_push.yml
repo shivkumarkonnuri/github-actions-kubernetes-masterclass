@@ -2,6 +2,11 @@ name: "Docker Build & Push"
 
 on:
   workflow_call:
+    inputs:
+      image_tag:
+        description: "Short SHA tag for the image (e.g. abc1234)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -10,9 +15,8 @@ jobs:
   # ── Backend ────────────────────────────────────────────────────────────────
   build-backend:
     name: Build & Push (Backend)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -34,17 +38,15 @@ jobs:
           push: ${{ vars.DEPLOY_ENABLED == 'true' }}
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-backend:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-backend:${{ github.sha }}
-          # GHA layer cache: only changed layers are rebuilt
+            ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-backend:${{ inputs.image_tag }}
           cache-from: type=gha,scope=backend
           cache-to:   type=gha,scope=backend,mode=max
 
   # ── Frontend ───────────────────────────────────────────────────────────────
   build-frontend:
     name: Build & Push (Frontend)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -66,7 +68,6 @@ jobs:
           push: ${{ vars.DEPLOY_ENABLED == 'true' }}
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-frontend:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-frontend:${{ github.sha }}
-          # GHA layer cache: only changed layers are rebuilt
+            ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-frontend:${{ inputs.image_tag }}
           cache-from: type=gha,scope=frontend
           cache-to:   type=gha,scope=frontend,mode=max

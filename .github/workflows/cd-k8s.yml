@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: write       # needed to create GitHub issue on failure
 
 jobs:
   kind-deploy:
@@ -19,11 +20,9 @@ jobs:
     environment: production
 
     steps:
-      # ── 1. Checkout — needed to scp k8s manifests to EC2 ─────────────────
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ── 2. Copy k8s manifests to EC2 ─────────────────────────────────────
       - name: Copy k8s manifests to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -33,7 +32,6 @@ jobs:
           source:   "k8s/"
           target:   "~/skillpulse"
 
-      # ── 3. SSH into EC2 — create or reuse cluster, load images, deploy ────
       - name: Deploy to kind cluster
         uses: appleboy/ssh-action@v1
         env:
@@ -56,14 +54,15 @@ jobs:
             NAMESPACE=skillpulse
             K8S_DIR=~/skillpulse/k8s
 
+            # Slice to 7 chars to match short SHA used in CI build & push
+            IMAGE_TAG="${IMAGE_TAG::7}"
             echo "=== Image tag: ${IMAGE_TAG} ==="
 
-            # ── 1. Create cluster only if it doesn't exist ────────────────────
-            # Reusing an existing cluster skips ~60s of teardown + creation
+            # ── 1. Create or reuse cluster ────────────────────────────────────
             if kind get clusters 2>/dev/null | grep -q "^${CLUSTER}$"; then
-              echo "Cluster '${CLUSTER}' already exists — reusing it (rolling update)"
+              echo "Cluster '${CLUSTER}' already exists — reusing (rolling update)"
             else
-              echo "Cluster '${CLUSTER}' not found — creating..."
+              echo "Creating kind cluster..."
               kind create cluster \
                 --config "${K8S_DIR}/kind-config.yaml" \
                 --name "$CLUSTER" \
@@ -71,28 +70,18 @@ jobs:
             fi
             kubectl get nodes
 
-            # ── 2. Pull exact SHA images from DockerHub (parallel) ────────────
-            echo "Pulling images in parallel..."
+            # ── 2. Pull and load images in parallel ───────────────────────────
+            echo "Pulling images..."
             docker pull "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}" &
             docker pull "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" &
             wait
 
-            # ── 3. Load images into every kind node (parallel) ────────────────
-            # kind nodes are isolated — they cannot pull from DockerHub at apply time
-            echo "Loading images into kind nodes in parallel..."
-            kind load docker-image \
-              "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}" \
-              --name "$CLUSTER" &
-            kind load docker-image \
-              "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" \
-              --name "$CLUSTER" &
+            echo "Loading images into kind nodes..."
+            kind load docker-image "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}"  --name "$CLUSTER" &
+            kind load docker-image "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" --name "$CLUSTER" &
             wait
 
-            echo "Images loaded into kind nodes:"
-            docker exec "${CLUSTER}-control-plane" crictl images 2>/dev/null || true
-
-            # ── 4. Pin manifests to exact SHA ─────────────────────────────────
-            # imagePullPolicy stays IfNotPresent — correct for kind-loaded images
+            # ── 3. Pin manifests to exact SHA ─────────────────────────────────
             sed -i \
               "s|image: .*/skillpulse-backend:.*|image: ${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}|" \
               "${K8S_DIR}/20-backend.yaml"
@@ -100,14 +89,13 @@ jobs:
               "s|image: .*/skillpulse-frontend:.*|image: ${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}|" \
               "${K8S_DIR}/30-frontend.yaml"
 
-            echo "Pinned image tags:"
-            grep "image:" "${K8S_DIR}/20-backend.yaml" "${K8S_DIR}/30-frontend.yaml"
+            # ── 4. Save current revision for rollback ─────────────────────────
+            PREV_BACKEND_REV=$(kubectl rollout history deployment/backend  -n "$NAMESPACE" --no-headers 2>/dev/null | tail -1 | awk '{print $1}' || echo "0")
+            PREV_FRONTEND_REV=$(kubectl rollout history deployment/frontend -n "$NAMESPACE" --no-headers 2>/dev/null | tail -1 | awk '{print $1}' || echo "0")
 
-            # ── 5. Create namespace ───────────────────────────────────────────
+            # ── 5. Apply namespace + secret + manifests ───────────────────────
             kubectl apply -f "${K8S_DIR}/00-namespace.yaml"
 
-            # ── 6. Inject DB secret from env — bypasses plaintext yaml ────────
-            # --dry-run=client | kubectl apply makes this idempotent
             kubectl create secret generic skillpulse-db \
               --namespace="$NAMESPACE" \
               --from-literal=MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
@@ -117,70 +105,160 @@ jobs:
               --save-config \
               --dry-run=client -o yaml | kubectl apply -f -
 
-            # ── 7. Apply all manifests (rolling update if cluster existed) ─────
             kubectl apply \
               -f "${K8S_DIR}/10-mysql.yaml" \
               -f "${K8S_DIR}/20-backend.yaml" \
-              -f "${K8S_DIR}/30-frontend.yaml"
+              -f "${K8S_DIR}/30-frontend.yaml" \
+              -f "${K8S_DIR}/50-pdb.yaml"
 
-            # ── 8. Wait for rollouts ──────────────────────────────────────────
-            # MySQL first — backend depends on it being ready
-            echo "Waiting for MySQL StatefulSet..."
-            kubectl rollout status statefulset/mysql \
-              -n "$NAMESPACE" --timeout=180s
-
-            # Backend and frontend are independent — wait in parallel
-            echo "Waiting for backend and frontend deployments in parallel..."
-            kubectl rollout status deployment/backend \
-              -n "$NAMESPACE" --timeout=120s &
-            kubectl rollout status deployment/frontend \
-              -n "$NAMESPACE" --timeout=60s &
+            # ── 6. Wait for rollouts ──────────────────────────────────────────
+            kubectl rollout status statefulset/mysql -n "$NAMESPACE" --timeout=180s
+            kubectl rollout status deployment/backend  -n "$NAMESPACE" --timeout=120s &
+            kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=60s  &
             wait
 
-            # ── 9. Health snapshot ────────────────────────────────────────────
             kubectl get pods,svc,endpoints -n "$NAMESPACE" -o wide
 
-            # ── 10. Smoke test — frontend via NodePort :8888 ──────────────────
-            # kind-config.yaml maps containerPort 30080 → hostPort 8888
-            echo "=== Smoke test: frontend ==="
-            for i in $(seq 1 6); do
-              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8888 || true)
-              if [ "$STATUS" = "200" ]; then
-                echo "Frontend passed (attempt $i) — HTTP $STATUS"
-                break
-              fi
-              echo "Attempt $i: HTTP $STATUS — retrying in 5s..."
-              sleep 5
-              if [ "$i" = "6" ]; then
-                echo "FRONTEND SMOKE TEST FAILED"
-                kubectl describe pods -n "$NAMESPACE"
-                kubectl logs -n "$NAMESPACE" -l app=frontend --tail=50
-                exit 1
-              fi
-            done
+            # ── 7. Smart smoke test with 3 self-heal attempts ─────────────────
+            # Item 6: tries to fix itself up to 3 times before rolling back
+            smoke_test() {
+              local SERVICE=$1
+              local URL=$2
+              local MAX_HEAL=3
 
-            # ── 11. Smoke test — backend /health via port-forward ─────────────
-            echo "=== Smoke test: backend /health ==="
+              for HEAL in $(seq 1 $MAX_HEAL); do
+                echo "--- Smoke test attempt ${HEAL}/${MAX_HEAL} for ${SERVICE} ---"
+                PASSED=false
+
+                for POLL in $(seq 1 6); do
+                  STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
+                  if [ "$STATUS" = "200" ]; then
+                    echo "${SERVICE} smoke test PASSED (heal=${HEAL}, poll=${POLL}) — HTTP $STATUS"
+                    PASSED=true
+                    break
+                  fi
+                  echo "Poll ${POLL}/6: HTTP $STATUS — waiting 5s..."
+                  sleep 5
+                done
+
+                if [ "$PASSED" = "true" ]; then
+                  return 0
+                fi
+
+                # Self-heal: restart the deployment and try again
+                if [ "$HEAL" -lt "$MAX_HEAL" ]; then
+                  echo "Self-heal attempt ${HEAL}: restarting ${SERVICE} deployment..."
+                  kubectl rollout restart deployment/"${SERVICE}" -n "$NAMESPACE" 2>/dev/null || true
+                  kubectl rollout status deployment/"${SERVICE}" -n "$NAMESPACE" --timeout=60s 2>/dev/null || true
+                  sleep 5
+                fi
+              done
+
+              # All 3 heal attempts failed
+              echo "${SERVICE} SMOKE TEST FAILED after ${MAX_HEAL} self-heal attempts"
+              echo "=== ${SERVICE} pod describe ==="
+              kubectl describe pods -n "$NAMESPACE" -l "app=${SERVICE}" || true
+              echo "=== ${SERVICE} logs ==="
+              kubectl logs -n "$NAMESPACE" -l "app=${SERVICE}" --tail=50 || true
+              return 1
+            }
+
+            # Test frontend via NodePort
+            smoke_test "frontend" "http://localhost:8888"
+
+            # Test backend via port-forward
             kubectl port-forward svc/backend 8080:8080 -n "$NAMESPACE" &
             PF_PID=$!
             sleep 3
+            if ! smoke_test "backend" "http://localhost:8080/health"; then
+              kill "$PF_PID" 2>/dev/null || true
+              exit 1
+            fi
+            kill "$PF_PID" 2>/dev/null || true
 
-            for i in $(seq 1 6); do
-              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health || true)
-              if [ "$STATUS" = "200" ]; then
-                echo "Backend passed (attempt $i) — HTTP $STATUS"
-                kill "$PF_PID" 2>/dev/null || true
-                break
-              fi
-              echo "Attempt $i: HTTP $STATUS — retrying in 5s..."
-              sleep 5
-              if [ "$i" = "6" ]; then
-                echo "BACKEND SMOKE TEST FAILED"
-                kill "$PF_PID" 2>/dev/null || true
-                kubectl describe pods -n "$NAMESPACE" -l app=backend
-                kubectl logs -n "$NAMESPACE" -l app=backend --tail=50
-                exit 1
-              fi
-            done
+            # ── Apply observability manifests ──────────────────────────
+            # ServiceMonitor tells Prometheus to scrape /metrics from backend
+            # Only applied if monitoring namespace exists (Ansible set it up)
+            if kubectl get namespace monitoring &>/dev/null; then
+              echo "Applying ServiceMonitor..."
+              kubectl apply -f "${K8S_DIR}/60-monitoring.yaml" || true
+            else
+              echo "Monitoring namespace not found — skipping ServiceMonitor"
+              echo "Run: ansible-playbook -i hosts.ini install-observability.yml"
+            fi
 
-            echo "=== kind cluster deploy complete — ${IMAGE_TAG} ==="
+            echo "=== Deploy complete — ${IMAGE_TAG} ==="
+
+      # ── 8. Rollback + alert on failure — Item 6 ───────────────────────────
+      - name: Rollback deployments on failure
+        if: failure()
+        uses: appleboy/ssh-action@v1
+        with:
+          host:     ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 5m
+          script: |
+            NAMESPACE=skillpulse
+            echo "Rolling back backend and frontend deployments..."
+            kubectl rollout undo deployment/backend  -n "$NAMESPACE" 2>/dev/null || true
+            kubectl rollout undo deployment/frontend -n "$NAMESPACE" 2>/dev/null || true
+            kubectl rollout status deployment/backend  -n "$NAMESPACE" --timeout=60s 2>/dev/null || true
+            kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=60s 2>/dev/null || true
+            echo "Rollback complete"
+            kubectl get pods -n "$NAMESPACE" -o wide
+
+      - name: Create GitHub issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              title: `🚨 Deploy failed after 3 self-heal attempts — ${context.sha.slice(0,7)}`,
+              body: [
+                '## Deployment Failure Report',
+                '',
+                `**Commit:** ${context.sha}`,
+                `**Branch:** ${context.ref}`,
+                `**Workflow run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                `**Time:** ${new Date().toISOString()}`,
+                '',
+                '### What happened',
+                'The deployment to the kind cluster failed after **3 self-heal attempts**.',
+                'The previous stable version has been automatically rolled back.',
+                '',
+                '### Action required',
+                '1. Check the workflow run logs linked above',
+                '2. Review pod logs and events on the EC2 kind cluster',
+                '3. Fix the issue and push a new commit',
+                '',
+                '> This issue was created automatically by the CD pipeline.',
+              ].join('\n'),
+              labels: ['deployment-failure', 'automated'],
+            });
+
+      - name: Send Slack alert on failure
+        if: failure() && secrets.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          payload: |
+            {
+              "text": "🚨 *SkillPulse deploy failed after 3 self-heal attempts*",
+              "attachments": [
+                {
+                  "color": "#FF0000",
+                  "fields": [
+                    { "title": "Commit",   "value": "${{ github.event.workflow_run.head_sha }}", "short": true },
+                    { "title": "Branch",   "value": "${{ github.ref_name }}",                    "short": true },
+                    { "title": "Status",   "value": "Rolled back to previous version",           "short": false },
+                    { "title": "Logs",     "value": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}", "short": false }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

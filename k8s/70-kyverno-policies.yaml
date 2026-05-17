@@ -1,0 +1,145 @@
+---
+# Kyverno ClusterPolicies — Item 5
+# Install Kyverno first:
+#   kubectl create -f https://github.com/kyverno/kyverno/releases/latest/download/install.yaml
+#
+# These policies are enforced at admission time — the cluster rejects
+# non-compliant manifests BEFORE they are scheduled. Self-enforcing security.
+
+# Policy 1: Containers must not run as root
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-non-root
+  annotations:
+    policies.kyverno.io/title: Require Non-Root Containers
+    policies.kyverno.io/description: >
+      Containers must run as a non-root user. Prevents privilege escalation
+      from container breakout.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-run-as-non-root
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [skillpulse]
+      validate:
+        message: "Containers must not run as root (runAsNonRoot: true required)"
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  runAsNonRoot: true
+---
+# Policy 2: Containers must drop ALL capabilities
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-drop-all-capabilities
+  annotations:
+    policies.kyverno.io/title: Require Drop All Capabilities
+    policies.kyverno.io/description: >
+      All Linux capabilities must be dropped. Only add back what is explicitly needed.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-drop-all
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [skillpulse]
+      validate:
+        message: "All capabilities must be dropped: capabilities.drop must include ALL"
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  capabilities:
+                    drop: ["ALL"]
+---
+# Policy 3: Privilege escalation must be disabled
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privilege-escalation
+  annotations:
+    policies.kyverno.io/title: Disallow Privilege Escalation
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-privilege-escalation
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [skillpulse]
+      validate:
+        message: "allowPrivilegeEscalation must be set to false"
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  allowPrivilegeEscalation: false
+---
+# Policy 4: Resource limits must be set
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resource-limits
+  annotations:
+    policies.kyverno.io/title: Require Resource Limits
+    policies.kyverno.io/description: >
+      CPU and memory limits must be set on all containers to prevent
+      resource starvation of other pods.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-resource-limits
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [skillpulse]
+      validate:
+        message: "CPU and memory limits must be specified for all containers"
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  limits:
+                    cpu: "?*"
+                    memory: "?*"
+---
+# Policy 5: Latest image tag is forbidden — must use specific SHA or version
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+  annotations:
+    policies.kyverno.io/title: Disallow Latest Tag
+    policies.kyverno.io/description: >
+      The :latest tag is mutable and non-reproducible. Images must use
+      a specific version tag or SHA digest.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-image-tag
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [skillpulse]
+      validate:
+        message: "Image tag ':latest' is not allowed. Use a specific version or SHA."
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"
