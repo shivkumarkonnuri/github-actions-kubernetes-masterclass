@@ -111,7 +111,7 @@ jobs:
             fi
 
             # Frontend smoke test
-            kubectl port-forward svc/frontend 8082:80 -n "$NAMESPACE" &
+            kubectl port-forward svc/frontend 8082:8080 -n "$NAMESPACE" &
             PF_FRONT_PID=$!
 
             sleep 5
@@ -300,7 +300,7 @@ jobs:
             }
 
             # Frontend smoke test
-            kubectl port-forward svc/frontend 8888:80 -n "$NAMESPACE" &
+            kubectl port-forward svc/frontend 8888:8080 -n "$NAMESPACE" &
             PF_FRONT_PID=$!
 
             sleep 5
