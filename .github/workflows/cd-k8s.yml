@@ -33,7 +33,7 @@ jobs:
           source:   "k8s/"
           target:   "~/skillpulse"
 
-      # ── 3. SSH into EC2 — create cluster, load images, deploy ────────────
+      # ── 3. SSH into EC2 — create or reuse cluster, load images, deploy ────
       - name: Deploy to kind cluster
         uses: appleboy/ssh-action@v1
         env:
@@ -58,27 +58,26 @@ jobs:
 
             echo "=== Image tag: ${IMAGE_TAG} ==="
 
-            # ── 1. Delete existing cluster — clean slate every deploy ─────────
+            # ── 1. Create cluster only if it doesn't exist ────────────────────
+            # Reusing an existing cluster skips ~60s of teardown + creation
             if kind get clusters 2>/dev/null | grep -q "^${CLUSTER}$"; then
-              echo "Deleting existing kind cluster..."
-              kind delete cluster --name "$CLUSTER"
+              echo "Cluster '${CLUSTER}' already exists — reusing it (rolling update)"
+            else
+              echo "Cluster '${CLUSTER}' not found — creating..."
+              kind create cluster \
+                --config "${K8S_DIR}/kind-config.yaml" \
+                --name "$CLUSTER" \
+                --wait 60s
             fi
-
-            # ── 2. Create fresh 3-node cluster from kind-config.yaml ──────────
-            echo "Creating kind cluster..."
-            kind create cluster \
-              --config "${K8S_DIR}/kind-config.yaml" \
-              --name "$CLUSTER" \
-              --wait 60s
             kubectl get nodes
 
-            # ── 3. Pull exact SHA images from DockerHub (parallel) ────────────
+            # ── 2. Pull exact SHA images from DockerHub (parallel) ────────────
             echo "Pulling images in parallel..."
             docker pull "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}" &
             docker pull "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" &
             wait
 
-            # ── 4. Load images into every kind node (parallel) ────────────────
+            # ── 3. Load images into every kind node (parallel) ────────────────
             # kind nodes are isolated — they cannot pull from DockerHub at apply time
             echo "Loading images into kind nodes in parallel..."
             kind load docker-image \
@@ -92,7 +91,7 @@ jobs:
             echo "Images loaded into kind nodes:"
             docker exec "${CLUSTER}-control-plane" crictl images 2>/dev/null || true
 
-            # ── 5. Pin manifests to exact SHA ─────────────────────────────────
+            # ── 4. Pin manifests to exact SHA ─────────────────────────────────
             # imagePullPolicy stays IfNotPresent — correct for kind-loaded images
             sed -i \
               "s|image: .*/skillpulse-backend:.*|image: ${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}|" \
@@ -104,10 +103,10 @@ jobs:
             echo "Pinned image tags:"
             grep "image:" "${K8S_DIR}/20-backend.yaml" "${K8S_DIR}/30-frontend.yaml"
 
-            # ── 6. Create namespace ───────────────────────────────────────────
+            # ── 5. Create namespace ───────────────────────────────────────────
             kubectl apply -f "${K8S_DIR}/00-namespace.yaml"
 
-            # ── 7. Inject DB secret from env — bypasses plaintext yaml ────────
+            # ── 6. Inject DB secret from env — bypasses plaintext yaml ────────
             # --dry-run=client | kubectl apply makes this idempotent
             kubectl create secret generic skillpulse-db \
               --namespace="$NAMESPACE" \
@@ -118,13 +117,13 @@ jobs:
               --save-config \
               --dry-run=client -o yaml | kubectl apply -f -
 
-            # ── 8. Apply all manifests ────────────────────────────────────────
+            # ── 7. Apply all manifests (rolling update if cluster existed) ─────
             kubectl apply \
               -f "${K8S_DIR}/10-mysql.yaml" \
               -f "${K8S_DIR}/20-backend.yaml" \
               -f "${K8S_DIR}/30-frontend.yaml"
 
-            # ── 9. Wait for rollouts ──────────────────────────────────────────
+            # ── 8. Wait for rollouts ──────────────────────────────────────────
             # MySQL first — backend depends on it being ready
             echo "Waiting for MySQL StatefulSet..."
             kubectl rollout status statefulset/mysql \
@@ -138,10 +137,10 @@ jobs:
               -n "$NAMESPACE" --timeout=60s &
             wait
 
-            # ── 10. Health snapshot ───────────────────────────────────────────
+            # ── 9. Health snapshot ────────────────────────────────────────────
             kubectl get pods,svc,endpoints -n "$NAMESPACE" -o wide
 
-            # ── 11. Smoke test — frontend via NodePort :8888 ──────────────────
+            # ── 10. Smoke test — frontend via NodePort :8888 ──────────────────
             # kind-config.yaml maps containerPort 30080 → hostPort 8888
             echo "=== Smoke test: frontend ==="
             for i in $(seq 1 6); do
@@ -160,7 +159,7 @@ jobs:
               fi
             done
 
-            # ── 12. Smoke test — backend /health via port-forward ─────────────
+            # ── 11. Smoke test — backend /health via port-forward ─────────────
             echo "=== Smoke test: backend /health ==="
             kubectl port-forward svc/backend 8080:8080 -n "$NAMESPACE" &
             PF_PID=$!
@@ -184,5 +183,4 @@ jobs:
               fi
             done
 
-            # ── 13. Debug dump on failure ─────────────────────────────────────
             echo "=== kind cluster deploy complete — ${IMAGE_TAG} ==="
