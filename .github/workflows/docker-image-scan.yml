@@ -15,38 +15,34 @@ permissions:
   security-events: write
 
 jobs:
-  trivy-scan:
-    name: Image vulnerability scan (Trivy)
+  # ── Backend scan ───────────────────────────────────────────────────────────
+  trivy-scan-backend:
+    name: Image vulnerability scan — Backend (Trivy)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      # Pull the exact SHA-tagged images built by docker-build-push job
+
       - name: Pull backend image from DockerHub
         run: docker pull ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-backend:${{ inputs.image_tag }}
- 
-      - name: Pull frontend image from DockerHub
-        run: docker pull ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-frontend:${{ inputs.image_tag }}
- 
-      # Tag with short name so trivy-action refs are clean
-      - name: Tag images for scanning
+
+      - name: Tag image for scanning
         run: |
-          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-backend:${{ inputs.image_tag }}  skillpulse-backend:scan
-          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-frontend:${{ inputs.image_tag }} skillpulse-frontend:scan
- 
-      # ── Backend scan ──────────────────────────────────────────────────────
-      - name: Trivy - backend (table, fails on CRITICAL/HIGH)
-        uses: aquasecurity/trivy-action@0.35.0
+          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-backend:${{ inputs.image_tag }} skillpulse-backend:scan
+
+      - name: Trivy — backend (table, fails on CRITICAL/HIGH)
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: skillpulse-backend:scan
           format: table
           exit-code: '1'
           severity: CRITICAL,HIGH
           ignore-unfixed: true
- 
-      - name: Trivy - backend (SARIF to GitHub Security tab)
-        uses: aquasecurity/trivy-action@0.35.0
+
+      - name: Trivy — backend (SARIF to GitHub Security tab)
+        uses: aquasecurity/trivy-action@v0.35.0
         if: always()
         with:
           image-ref: skillpulse-backend:scan
@@ -54,26 +50,42 @@ jobs:
           output: trivy-backend.sarif
           severity: CRITICAL,HIGH
           ignore-unfixed: true
- 
+
       - name: Upload backend SARIF
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: trivy-backend.sarif
           category: trivy-backend
- 
-      # ── Frontend scan ─────────────────────────────────────────────────────
-      - name: Trivy - frontend (table, fails on CRITICAL/HIGH)
-        uses: aquasecurity/trivy-action@0.35.0
+
+  # ── Frontend scan ──────────────────────────────────────────────────────────
+  trivy-scan-frontend:
+    name: Image vulnerability scan — Frontend (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Pull frontend image from DockerHub
+        run: docker pull ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-frontend:${{ inputs.image_tag }}
+
+      - name: Tag image for scanning
+        run: |
+          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-frontend:${{ inputs.image_tag }} skillpulse-frontend:scan
+
+      - name: Trivy — frontend (table, fails on CRITICAL/HIGH)
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: skillpulse-frontend:scan
           format: table
           exit-code: '1'
           severity: CRITICAL,HIGH
           ignore-unfixed: true
- 
-      - name: Trivy - frontend (SARIF to GitHub Security tab)
-        uses: aquasecurity/trivy-action@0.35.0
+
+      - name: Trivy — frontend (SARIF to GitHub Security tab)
+        uses: aquasecurity/trivy-action@v0.35.0
         if: always()
         with:
           image-ref: skillpulse-frontend:scan
@@ -81,10 +93,10 @@ jobs:
           output: trivy-frontend.sarif
           severity: CRITICAL,HIGH
           ignore-unfixed: true
- 
+
       - name: Upload frontend SARIF
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: trivy-frontend.sarif
-          category: trivy-frontend 
+          category: trivy-frontend
