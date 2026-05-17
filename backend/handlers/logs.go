@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -30,10 +31,13 @@ func CreateLog(c *gin.Context) {
 		skillID, req.Hours, req.Notes, req.LogDate,
 	)
 	if err != nil {
+		slog.Error("CreateLog: insert failed", "skill_id", skillID, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	id, _ := result.LastInsertId()
+	slog.Info("learning session logged", "log_id", id, "skill_id", skillID, "hours", req.Hours)
 	c.JSON(http.StatusCreated, gin.H{"id": id, "message": "Learning session logged"})
 }
+

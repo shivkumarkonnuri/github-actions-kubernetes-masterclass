@@ -11,6 +11,19 @@ type Skill struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// ProgressPercent returns how far along (0-100) the skill is toward its target.
+// Returns 0 if TargetHours is not set; caps at 100 if already exceeded.
+func (s Skill) ProgressPercent() float64 {
+	if s.TargetHours <= 0 {
+		return 0
+	}
+	pct := (s.TotalHours / float64(s.TargetHours)) * 100
+	if pct > 100 {
+		return 100
+	}
+	return pct
+}
+
 type CreateSkillRequest struct {
 	Name        string `json:"name" binding:"required"`
 	Category    string `json:"category"`
@@ -38,3 +51,4 @@ type Dashboard struct {
 	TotalLogs   int     `json:"total_logs"`
 	TopSkill    string  `json:"top_skill"`
 }
+

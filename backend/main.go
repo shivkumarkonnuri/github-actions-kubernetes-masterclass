@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 	"os"
 
 	"github.com/gin-gonic/gin"
@@ -10,6 +10,13 @@ import (
 )
 
 func main() {
+	// Structured JSON logger — every log line is machine-parseable
+	// Works out of the box with CloudWatch, Loki, or any log aggregator.
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	slog.SetDefault(logger)
+
 	database.Connect()
 
 	router := gin.Default()
@@ -33,8 +40,10 @@ func main() {
 		port = "8080"
 	}
 
-	log.Printf("SkillPulse API running on port %s", port)
+	slog.Info("SkillPulse API starting", "port", port)
 	if err := router.Run(":" + port); err != nil {
-		log.Fatal(err)
+		slog.Error("server failed", "error", err)
+		os.Exit(1)
 	}
 }
+

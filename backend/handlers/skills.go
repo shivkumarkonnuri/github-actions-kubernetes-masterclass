@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -19,20 +19,22 @@ func GetSkills(c *gin.Context) {
 		ORDER BY s.created_at DESC
 	`)
 	if err != nil {
+		slog.Error("GetSkills: query failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	defer func() {
-    	   if err := rows.Close(); err != nil {
-        	log.Printf("error closing rows: %v", err)
-    	   }
+		if err := rows.Close(); err != nil {
+			slog.Warn("GetSkills: error closing rows", "error", err)
+		}
 	}()
 
 	skills := []models.Skill{}
 	for rows.Next() {
 		var s models.Skill
 		if err := rows.Scan(&s.ID, &s.Name, &s.Category, &s.TargetHours, &s.TotalHours, &s.CreatedAt); err != nil {
+			slog.Error("GetSkills: scan failed", "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -54,11 +56,13 @@ func CreateSkill(c *gin.Context) {
 		req.Name, req.Category, req.TargetHours,
 	)
 	if err != nil {
+		slog.Error("CreateSkill: insert failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	id, _ := result.LastInsertId()
+	slog.Info("skill created", "id", id, "name", req.Name)
 	c.JSON(http.StatusCreated, gin.H{"id": id, "message": "Skill created"})
 }
 
@@ -80,25 +84,26 @@ func GetSkill(c *gin.Context) {
 		return
 	}
 
-	// Get learning logs for this skill
 	rows, err := database.DB.Query(
 		"SELECT id, skill_id, hours, notes, log_date, created_at FROM learning_logs WHERE skill_id = ? ORDER BY log_date DESC",
 		id,
 	)
 	if err != nil {
+		slog.Error("GetSkill: logs query failed", "skill_id", id, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	defer func() {
-   	   if err := rows.Close(); err != nil {
-              log.Printf("error closing rows: %v", err)
-    	   }
- 	}()
+		if err := rows.Close(); err != nil {
+			slog.Warn("GetSkill: error closing rows", "error", err)
+		}
+	}()
 
 	logs := []models.LearningLog{}
 	for rows.Next() {
 		var l models.LearningLog
 		if err := rows.Scan(&l.ID, &l.SkillID, &l.Hours, &l.Notes, &l.LogDate, &l.CreatedAt); err != nil {
+			slog.Error("GetSkill: log scan failed", "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -113,6 +118,7 @@ func DeleteSkill(c *gin.Context) {
 
 	result, err := database.DB.Exec("DELETE FROM skills WHERE id = ?", id)
 	if err != nil {
+		slog.Error("DeleteSkill: delete failed", "skill_id", id, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -123,5 +129,7 @@ func DeleteSkill(c *gin.Context) {
 		return
 	}
 
+	slog.Info("skill deleted", "id", id)
 	c.JSON(http.StatusOK, gin.H{"message": "Skill deleted"})
 }
+

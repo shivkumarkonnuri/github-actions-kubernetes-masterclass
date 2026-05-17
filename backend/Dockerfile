@@ -11,10 +11,19 @@ FROM alpine:3.23
 
 RUN apk --no-cache add ca-certificates=20260413-r0
 
+# Create non-root user and group
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
 WORKDIR /app
 
 COPY --from=builder /app/skillpulse .
 
+# Ensure the binary is owned by appuser
+RUN chown appuser:appgroup /app/skillpulse
+
+USER appuser
+
 EXPOSE 8080
 
 CMD ["./skillpulse"]
+

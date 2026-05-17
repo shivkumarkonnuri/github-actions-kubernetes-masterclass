@@ -1,6 +1,15 @@
 name: CI
 
 on:
+  # Run on every PR targeting main — blocks merge until checks pass
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - 'k8s/**'
+      - 'docs/**'
+      - '**/*.md'
+
+  # Also run on direct push to main (e.g. after a merge)
   push:
     branches: [main]
     paths-ignore:
@@ -15,8 +24,6 @@ permissions:
 jobs:
 
   # ── Static analysis / scan jobs (all run in parallel) ──────────────────────
-  # actions/setup-go restores the module cache automatically on every run
-  # (keyed on go.sum), so a separate warm-cache job is not needed.
   code-quality:
     uses: ./.github/workflows/code-quality.yml
 
@@ -30,16 +37,22 @@ jobs:
   docker-lint:
     uses: ./.github/workflows/docker-lint.yml
 
-  # ── Build — backend and frontend run in parallel ────────────────────────────
+  # ── Unit tests — run in parallel with scans ─────────────────────────────────
+  unit-tests:
+    uses: ./.github/workflows/unit-tests.yml
+
+  # ── Build — only after all quality gates pass ────────────────────────────────
+  # On PRs: build but do NOT push (DEPLOY_ENABLED is only set on main)
   docker-build-push:
-    needs: [code-quality, secrets-scan, dependency-scan, docker-lint]
+    needs: [code-quality, secrets-scan, dependency-scan, docker-lint, unit-tests]
     uses: ./.github/workflows/docker_build_push.yml
     secrets: inherit
 
-  # ── Scan — backend and frontend run in parallel ─────────────────────────────
+  # ── Scan — after build ───────────────────────────────────────────────────────
   docker-image-scan:
     needs: [docker-build-push]
     uses: ./.github/workflows/docker-image-scan.yml
     secrets: inherit
     with:
       image_tag: ${{ github.sha }}
+

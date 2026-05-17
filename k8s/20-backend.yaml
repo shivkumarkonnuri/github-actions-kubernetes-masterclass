@@ -30,6 +30,15 @@ spec:
       labels:
         app: backend
     spec:
+      # Pod-level: no service account token auto-mounted
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: backend
           image: trainwithshubham/skillpulse-backend:latest
@@ -64,7 +73,15 @@ spec:
               cpu: 100m
               memory: 64Mi
             limits:
+              cpu: 250m       # added: prevents CPU starvation of other pods
               memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
           livenessProbe:
             httpGet:
               path: /health
@@ -77,3 +94,6 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 5
+          # No writable filesystem needed — backend is stateless
+          # If temp files are needed, add an emptyDir volume here
+

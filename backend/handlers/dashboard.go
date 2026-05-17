@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -12,16 +13,19 @@ func GetDashboard(c *gin.Context) {
 	var dash models.Dashboard
 
 	if err := database.DB.QueryRow("SELECT COUNT(*) FROM skills").Scan(&dash.TotalSkills); err != nil {
- 	   c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-    	   return
+		slog.Error("GetDashboard: skills count failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 	if err := database.DB.QueryRow("SELECT COALESCE(SUM(hours), 0) FROM learning_logs").Scan(&dash.TotalHours); err != nil {
-    	   c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-    	   return
+		slog.Error("GetDashboard: hours sum failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 	if err := database.DB.QueryRow("SELECT COUNT(*) FROM learning_logs").Scan(&dash.TotalLogs); err != nil {
-           c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-    	   return
+		slog.Error("GetDashboard: logs count failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 	err := database.DB.QueryRow(`
 		SELECT s.name FROM skills s
@@ -40,8 +44,10 @@ func GetDashboard(c *gin.Context) {
 func HealthCheck(c *gin.Context) {
 	err := database.DB.Ping()
 	if err != nil {
+		slog.Warn("health check failed", "error", err)
 		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy", "error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "healthy"})
 }
+

@@ -3,7 +3,7 @@ package database
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"time"
 
@@ -27,18 +27,19 @@ func Connect() {
 		if err == nil {
 			err = DB.Ping()
 			if err == nil {
-				log.Println("Connected to MySQL database")
+				slog.Info("connected to MySQL database", "host", host, "port", port, "db", dbname)
 				DB.SetMaxOpenConns(10)
 				DB.SetMaxIdleConns(5)
 				DB.SetConnMaxLifetime(5 * time.Minute)
 				return
 			}
 		}
-		log.Printf("Waiting for database... attempt %d/30", i+1)
+		slog.Warn("waiting for database", "attempt", i+1, "max", 30, "error", err)
 		time.Sleep(2 * time.Second)
 	}
 
-	log.Fatalf("Could not connect to database: %v", err)
+	slog.Error("could not connect to database", "error", err)
+	os.Exit(1)
 }
 
 func getEnv(key, fallback string) string {
@@ -47,3 +48,4 @@ func getEnv(key, fallback string) string {
 	}
 	return fallback
 }
+
