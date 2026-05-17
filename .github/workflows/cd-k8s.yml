@@ -72,22 +72,22 @@ jobs:
               --wait 60s
             kubectl get nodes
 
-            # ── 3. Pull exact SHA images from DockerHub ───────────────────────
-            echo "Pulling images..."
-            docker pull "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}"
-            docker pull "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}"
+            # ── 3. Pull exact SHA images from DockerHub (parallel) ────────────
+            echo "Pulling images in parallel..."
+            docker pull "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}" &
+            docker pull "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" &
+            wait
 
-            # ── 4. Load images into every kind node ───────────────────────────
+            # ── 4. Load images into every kind node (parallel) ────────────────
             # kind nodes are isolated — they cannot pull from DockerHub at apply time
-            echo "Loading backend image into kind nodes..."
+            echo "Loading images into kind nodes in parallel..."
             kind load docker-image \
               "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}" \
-              --name "$CLUSTER"
-
-            echo "Loading frontend image into kind nodes..."
+              --name "$CLUSTER" &
             kind load docker-image \
               "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" \
-              --name "$CLUSTER"
+              --name "$CLUSTER" &
+            wait
 
             echo "Images loaded into kind nodes:"
             docker exec "${CLUSTER}-control-plane" crictl images 2>/dev/null || true
@@ -125,17 +125,18 @@ jobs:
               -f "${K8S_DIR}/30-frontend.yaml"
 
             # ── 9. Wait for rollouts ──────────────────────────────────────────
+            # MySQL first — backend depends on it being ready
             echo "Waiting for MySQL StatefulSet..."
             kubectl rollout status statefulset/mysql \
               -n "$NAMESPACE" --timeout=180s
 
-            echo "Waiting for backend Deployment..."
+            # Backend and frontend are independent — wait in parallel
+            echo "Waiting for backend and frontend deployments in parallel..."
             kubectl rollout status deployment/backend \
-              -n "$NAMESPACE" --timeout=120s
-
-            echo "Waiting for frontend Deployment..."
+              -n "$NAMESPACE" --timeout=120s &
             kubectl rollout status deployment/frontend \
-              -n "$NAMESPACE" --timeout=60s
+              -n "$NAMESPACE" --timeout=60s &
+            wait
 
             # ── 10. Health snapshot ───────────────────────────────────────────
             kubectl get pods,svc,endpoints -n "$NAMESPACE" -o wide
