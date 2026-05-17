@@ -2,6 +2,16 @@ name: "Docker Build & Push"
 
 on:
   workflow_call:
+    inputs:
+      image_tag:
+        description: "Short SHA image tag passed from ci.yml (e.g. abc1234)"
+        required: true
+        type: string
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
 
 permissions:
   contents: read
@@ -34,8 +44,7 @@ jobs:
           push: ${{ vars.DEPLOY_ENABLED == 'true' }}
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-backend:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-backend:${{ github.sha }}
-          # GHA layer cache: only changed layers are rebuilt
+            ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-backend:${{ inputs.image_tag }}
           cache-from: type=gha,scope=backend
           cache-to:   type=gha,scope=backend,mode=max
 
@@ -47,6 +56,6 @@ jobs:
           push: ${{ vars.DEPLOY_ENABLED == 'true' }}
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-frontend:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-frontend:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/skillpulse-frontend:${{ inputs.image_tag }}
           cache-from: type=gha,scope=frontend
           cache-to:   type=gha,scope=frontend,mode=max
