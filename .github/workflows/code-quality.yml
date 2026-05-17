@@ -9,7 +9,7 @@ permissions:
 jobs:
   golangci-lint:
     name: Go lint (golangci-lint)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     
     steps:
@@ -28,4 +28,3 @@ jobs:
           version: v2.12.2
           working-directory: backend
           args: --timeout=5m
-          cache: true

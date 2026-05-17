@@ -9,7 +9,7 @@ permissions:
 jobs:
   hadolint:
     name: Dockerfile lint (Hadolint)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
 
     steps:
@@ -27,4 +27,3 @@ jobs:
         with:
           dockerfile: frontend/Dockerfile
           failure-threshold: warning
-

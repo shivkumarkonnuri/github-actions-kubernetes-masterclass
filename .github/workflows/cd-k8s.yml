@@ -11,12 +11,73 @@ permissions:
 
 jobs:
 
-  # ── Staging gate ─────────────────────────────────────────────────────────────
-  deploy-staging:
-    name: Deploy to staging namespace
+  # ── Job 1: Create kind cluster if not exists ──────────────────────────────
+  # Runs first — staging and production both depend on this
+  cluster-setup:
+    name: Ensure kind cluster exists
     if: |
       github.event.workflow_run.conclusion == 'success' &&
       vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy k8s manifests to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host:     ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          source:   "k8s/"
+          target:   "~/skillpulse"
+
+      - name: Create kind cluster if not exists
+        uses: appleboy/ssh-action@v1
+        with:
+          host:     ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 8m
+          script: |
+            set -euo pipefail
+
+            CLUSTER=skillpulse
+            K8S_DIR=~/skillpulse/k8s
+
+            if kind get clusters 2>/dev/null | grep -q "^${CLUSTER}$"; then
+              echo "Cluster '${CLUSTER}' already exists — skipping creation"
+            else
+              echo "Creating kind cluster..."
+              kind create cluster \
+                --config "${K8S_DIR}/kind-config.yaml" \
+                --name "$CLUSTER" \
+                --wait 60s
+
+              echo "Installing metrics-server..."
+              kubectl apply --validate=false \
+                -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+              kubectl patch deployment metrics-server \
+                -n kube-system \
+                --type=json \
+                -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+
+              kubectl rollout status deployment/metrics-server \
+                -n kube-system --timeout=60s
+            fi
+
+            kubectl get nodes
+            echo "Cluster ready."
+
+  # ── Job 2: Staging deploy ─────────────────────────────────────────────────
+  # Runs after cluster exists — deploys to skillpulse-staging namespace
+  deploy-staging:
+    name: Deploy to staging namespace
+    needs: cluster-setup
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: staging
@@ -59,13 +120,22 @@ jobs:
 
             echo "=== Staging deploy: ${IMAGE_TAG} ==="
 
-            if ! kind get clusters 2>/dev/null | grep -q "^${CLUSTER}$"; then
-              echo "ERROR: kind cluster '${CLUSTER}' not found. Run a production deploy first."
-              exit 1
-            fi
+            # Pull and load images into kind nodes
+            echo "Pulling images..."
+            docker pull "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}" &
+            docker pull "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" &
+            wait
 
-            kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+            echo "Loading images into kind..."
+            kind load docker-image "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}"  --name "$CLUSTER" &
+            kind load docker-image "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" --name "$CLUSTER" &
+            wait
 
+            # Create namespace
+            kubectl create namespace "$NAMESPACE" \
+              --dry-run=client -o yaml | kubectl apply -f -
+
+            # Inject DB secret
             kubectl create secret generic skillpulse-db \
               --namespace="$NAMESPACE" \
               --from-literal=MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
@@ -75,33 +145,33 @@ jobs:
               --save-config \
               --dry-run=client -o yaml | kubectl apply -f -
 
+            # Pin image tags
             sed -i \
               "s|image: .*/skillpulse-backend:.*|image: ${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}|" \
               "${K8S_DIR}/20-backend.yaml"
-
             sed -i \
               "s|image: .*/skillpulse-frontend:.*|image: ${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}|" \
               "${K8S_DIR}/30-frontend.yaml"
 
-            kubectl apply --validate=false -f "${K8S_DIR}/10-mysql.yaml" --namespace="$NAMESPACE"
-            kubectl apply --validate=false -f "${K8S_DIR}/20-backend.yaml" --namespace="$NAMESPACE"
-            kubectl apply --validate=false -f "${K8S_DIR}/30-frontend.yaml" --namespace="$NAMESPACE"
+            # Apply manifests
+            kubectl apply --validate=false \
+              -f "${K8S_DIR}/10-mysql.yaml" \
+              -f "${K8S_DIR}/20-backend.yaml" \
+              -f "${K8S_DIR}/30-frontend.yaml" \
+              -n "$NAMESPACE"
 
-            echo "Waiting for pods to initialize..."
+            echo "Waiting for pods..."
             sleep 20
 
-            kubectl rollout status statefulset/mysql   -n "$NAMESPACE" --timeout=300s
+            kubectl rollout status statefulset/mysql  -n "$NAMESPACE" --timeout=300s
             kubectl rollout status deployment/backend  -n "$NAMESPACE" --timeout=300s
             kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=180s
 
             # Backend smoke test
             kubectl port-forward svc/backend 8081:8080 -n "$NAMESPACE" &
             PF_BACK_PID=$!
-
             sleep 5
-
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/health || true)
-
             kill "$PF_BACK_PID" 2>/dev/null || true
 
             if [ "$STATUS" != "200" ]; then
@@ -111,13 +181,10 @@ jobs:
             fi
 
             # Frontend smoke test
-            kubectl port-forward svc/frontend 8082:8080 -n "$NAMESPACE" &
+            kubectl port-forward svc/frontend 8082:80 -n "$NAMESPACE" &
             PF_FRONT_PID=$!
-
             sleep 5
-
             FRONT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8082 || true)
-
             kill "$PF_FRONT_PID" 2>/dev/null || true
 
             if [ "$FRONT_STATUS" != "200" ]; then
@@ -129,13 +196,11 @@ jobs:
             echo "=== Staging smoke tests PASSED ==="
             echo "=== Staging deploy complete: ${IMAGE_TAG} ==="
 
-  # ── Production deploy ─────────────────────────────────────────────────────────
+  # ── Job 3: Production deploy ──────────────────────────────────────────────
+  # Runs only after staging passes
   kind-deploy:
     name: Deploy to production (kind cluster on EC2)
     needs: deploy-staging
-    if: |
-      github.event.workflow_run.conclusion == 'success' &&
-      vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: production
@@ -174,51 +239,25 @@ jobs:
             CLUSTER=skillpulse
             NAMESPACE=skillpulse
             K8S_DIR=~/skillpulse/k8s
-
             IMAGE_TAG="${IMAGE_TAG::7}"
 
-            echo "=== Image tag: ${IMAGE_TAG} ==="
-
-            if kind get clusters 2>/dev/null | grep -q "^${CLUSTER}$"; then
-              echo "Cluster '${CLUSTER}' already exists — reusing"
-            else
-              echo "Creating kind cluster..."
-
-              kind create cluster \
-                --config "${K8S_DIR}/kind-config.yaml" \
-                --name "$CLUSTER" \
-                --wait 60s
-
-              echo "Installing metrics-server..."
-
-              kubectl apply --validate=false -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
-
-              kubectl patch deployment metrics-server \
-                -n kube-system \
-                --type=json \
-                -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
-
-              kubectl rollout status deployment/metrics-server -n kube-system --timeout=60s
-            fi
+            echo "=== Production deploy: ${IMAGE_TAG} ==="
 
             kubectl get nodes
 
             echo "Pulling images..."
-
             docker pull "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}" &
             docker pull "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" &
             wait
 
             echo "Loading images into kind..."
-
-            kind load docker-image "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}" --name "$CLUSTER" &
+            kind load docker-image "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}"  --name "$CLUSTER" &
             kind load docker-image "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" --name "$CLUSTER" &
             wait
 
             sed -i \
               "s|image: .*/skillpulse-backend:.*|image: ${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}|" \
               "${K8S_DIR}/20-backend.yaml"
-
             sed -i \
               "s|image: .*/skillpulse-frontend:.*|image: ${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}|" \
               "${K8S_DIR}/30-frontend.yaml"
@@ -242,12 +281,12 @@ jobs:
               -f "${K8S_DIR}/50-pdb.yaml" \
               -f "${K8S_DIR}/80-hpa.yaml"
 
-            echo "Waiting for pods to initialize..."
+            echo "Waiting for pods..."
             sleep 20
 
             kubectl rollout status statefulset/mysql -n "$NAMESPACE" --timeout=300s
 
-            kubectl rollout status deployment/backend -n "$NAMESPACE" --timeout=300s &
+            kubectl rollout status deployment/backend  -n "$NAMESPACE" --timeout=300s &
             kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=180s &
             wait
 
@@ -260,18 +299,15 @@ jobs:
 
               for HEAL in $(seq 1 $MAX_HEAL); do
                 echo "--- Smoke test attempt ${HEAL}/${MAX_HEAL} for ${SERVICE} ---"
-
                 PASSED=false
 
                 for POLL in $(seq 1 6); do
                   STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
-
                   if [ "$STATUS" = "200" ]; then
                     echo "${SERVICE} smoke test PASSED — HTTP $STATUS"
                     PASSED=true
                     break
                   fi
-
                   echo "Poll ${POLL}/6: HTTP $STATUS — waiting 5s..."
                   sleep 5
                 done
@@ -282,47 +318,35 @@ jobs:
 
                 if [ "$HEAL" -lt "$MAX_HEAL" ]; then
                   echo "Restarting ${SERVICE}..."
-
                   kubectl rollout restart deployment/"${SERVICE}" -n "$NAMESPACE" || true
-
-                  kubectl rollout status deployment/"${SERVICE}" \
-                    -n "$NAMESPACE" \
-                    --timeout=120s || true
-
+                  kubectl rollout status deployment/"${SERVICE}" -n "$NAMESPACE" --timeout=120s || true
                   sleep 5
                 fi
               done
 
               kubectl describe pods -n "$NAMESPACE" -l "app=${SERVICE}" || true
               kubectl logs -n "$NAMESPACE" -l "app=${SERVICE}" --tail=50 || true
-
               return 1
             }
 
             # Frontend smoke test
             kubectl port-forward svc/frontend 8888:8080 -n "$NAMESPACE" &
             PF_FRONT_PID=$!
-
             sleep 5
-
             if ! smoke_test "frontend" "http://localhost:8888"; then
               kill "$PF_FRONT_PID" 2>/dev/null || true
               exit 1
             fi
-
             kill "$PF_FRONT_PID" 2>/dev/null || true
 
             # Backend smoke test
             kubectl port-forward svc/backend 8080:8080 -n "$NAMESPACE" &
             PF_BACK_PID=$!
-
             sleep 5
-
             if ! smoke_test "backend" "http://localhost:8080/health"; then
               kill "$PF_BACK_PID" 2>/dev/null || true
               exit 1
             fi
-
             kill "$PF_BACK_PID" 2>/dev/null || true
 
             if kubectl get namespace monitoring &>/dev/null; then
@@ -332,6 +356,72 @@ jobs:
             echo "=== HPA status ==="
             kubectl get hpa -n "$NAMESPACE"
 
-            echo "=== Deploy complete — ${IMAGE_TAG} ==="
+            echo "=== Production deploy complete — ${IMAGE_TAG} ==="
 
+      # ── Rollback on failure ────────────────────────────────────────────────
+      - name: Rollback on failure
+        if: failure()
+        uses: appleboy/ssh-action@v1
+        with:
+          host:     ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 5m
+          script: |
+            NAMESPACE=skillpulse
+            echo "Rolling back..."
+            kubectl rollout undo deployment/backend  -n "$NAMESPACE" || true
+            kubectl rollout undo deployment/frontend -n "$NAMESPACE" || true
+            kubectl rollout status deployment/backend  -n "$NAMESPACE" --timeout=60s || true
+            kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=60s || true
+            echo "Rollback complete"
+            kubectl get pods -n "$NAMESPACE" -o wide
 
+      - name: Create GitHub issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              title: `🚨 Production deploy failed — ${context.sha.slice(0,7)}`,
+              body: [
+                '## Deployment Failure Report',
+                '',
+                `**Commit:** ${context.sha}`,
+                `**Workflow run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                `**Time:** ${new Date().toISOString()}`,
+                '',
+                '### What happened',
+                'Production deployment failed after 3 self-heal attempts. Previous version has been rolled back.',
+                '',
+                '### Action required',
+                '1. Check the workflow run logs above',
+                '2. Fix the issue and push a new commit',
+                '',
+                '> Auto-created by CD pipeline.',
+              ].join('\n'),
+              labels: ['deployment-failure', 'automated'],
+            });
+
+      - name: Send Slack alert on failure
+        if: failure() && vars.SLACK_ENABLED == 'true'
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          payload: |
+            {
+              "text": "🚨 *SkillPulse production deploy failed*",
+              "attachments": [{
+                "color": "#FF0000",
+                "fields": [
+                  { "title": "Commit", "value": "${{ github.event.workflow_run.head_sha }}", "short": true },
+                  { "title": "Status", "value": "Rolled back to previous version", "short": true },
+                  { "title": "Logs",   "value": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}", "short": false }
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
