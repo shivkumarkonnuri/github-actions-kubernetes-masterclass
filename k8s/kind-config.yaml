@@ -8,6 +8,9 @@ nodes:
       - containerPort: 30080
         hostPort: 8888
         protocol: TCP
+      - containerPort: 30030    # ← add this
+        hostPort: 3000
+        protocol: TCP
   - role: worker
     image: kindest/node:v1.35.1
   - role: worker
