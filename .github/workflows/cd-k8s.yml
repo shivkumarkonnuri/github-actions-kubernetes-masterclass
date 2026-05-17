@@ -241,7 +241,7 @@ jobs:
             });
 
       - name: Send Slack alert on failure
-        if: failure() && secrets.SLACK_WEBHOOK_URL != ''
+        if: failure() && vars.SLACK_ENABLED == 'true'
         uses: slackapi/slack-github-action@v1.27.0
         with:
           payload: |
