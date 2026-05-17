@@ -37,7 +37,7 @@ jobs:
  
       # ── Backend scan ──────────────────────────────────────────────────────
       - name: Trivy - backend (table, fails on CRITICAL/HIGH)
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: skillpulse-backend:scan
           format: table
@@ -46,7 +46,7 @@ jobs:
           ignore-unfixed: true
  
       - name: Trivy - backend (SARIF to GitHub Security tab)
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@0.35.0
         if: always()
         with:
           image-ref: skillpulse-backend:scan
@@ -64,7 +64,7 @@ jobs:
  
       # ── Frontend scan ─────────────────────────────────────────────────────
       - name: Trivy - frontend (table, fails on CRITICAL/HIGH)
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: skillpulse-frontend:scan
           format: table
@@ -73,7 +73,7 @@ jobs:
           ignore-unfixed: true
  
       - name: Trivy - frontend (SARIF to GitHub Security tab)
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@0.35.0
         if: always()
         with:
           image-ref: skillpulse-frontend:scan
