@@ -1,0 +1,189 @@
+---
+# ansible/playbook.yml
+# Installs all prerequisites for running a kind cluster on Ubuntu 24.04
+#
+# Run with:
+#   ansible-playbook -i inventory.ini playbook.yml
+#
+# What this installs:
+#   - Docker CE          (container runtime — kind runs inside Docker)
+#   - kind               (Kubernetes IN Docker)
+#   - kubectl            (Kubernetes CLI)
+#   - git, curl, wget    (basic tools used by the deploy workflow)
+
+- name: Install prerequisites for kind cluster on EC2
+  hosts: kind_node
+  become: true
+  gather_facts: true
+
+  vars:
+    # Pin versions for reproducibility — update deliberately
+    kind_version:    "v0.27.0"
+    kubectl_version: "v1.35.1"     # matches kindest/node:v1.35.1 in kind-config.yaml
+    docker_arch:     "amd64"
+
+  tasks:
+
+    ###########################################################################
+    # 1. System baseline
+    ###########################################################################
+
+    - name: Update apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install baseline packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - wget
+          - git
+          - gnupg
+          - lsb-release
+          - software-properties-common
+          - unzip
+        state: present
+
+    ###########################################################################
+    # 2. Docker CE
+    ###########################################################################
+
+    - name: Create Docker apt keyring directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Docker GPG key
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+          | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Add Docker apt repository
+      shell: |
+        echo \
+          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+          https://download.docker.com/linux/ubuntu \
+          $(lsb_release -cs) stable" \
+          > /etc/apt/sources.list.d/docker.list
+      args:
+        creates: /etc/apt/sources.list.d/docker.list
+
+    - name: Update apt cache after adding Docker repo
+      apt:
+        update_cache: true
+
+    - name: Install Docker CE
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add ubuntu user to docker group (no sudo needed)
+      user:
+        name: ubuntu
+        groups: docker
+        append: true
+
+    ###########################################################################
+    # 3. kind
+    ###########################################################################
+
+    - name: Download kind binary
+      get_url:
+        url: "https://kind.sigs.k8s.io/dl/{{ kind_version }}/kind-linux-{{ docker_arch }}"
+        dest: /usr/local/bin/kind
+        mode: "0755"
+        force: false     # skip if already present at correct path
+
+    - name: Verify kind installation
+      command: kind version
+      register: kind_version_output
+      changed_when: false
+
+    - name: Show kind version
+      debug:
+        msg: "{{ kind_version_output.stdout }}"
+
+    ###########################################################################
+    # 4. kubectl
+    ###########################################################################
+
+    - name: Download kubectl binary
+      get_url:
+        url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/{{ docker_arch }}/kubectl"
+        dest: /usr/local/bin/kubectl
+        mode: "0755"
+        force: false
+
+    - name: Verify kubectl installation
+      command: kubectl version --client --output=yaml
+      register: kubectl_version_output
+      changed_when: false
+
+    - name: Show kubectl version
+      debug:
+        msg: "{{ kubectl_version_output.stdout }}"
+
+    ###########################################################################
+    # 6. Sysctl tuning for kind
+    #    br_netfilter must be loaded first — it exposes the bridge sysctl keys.
+    #    Without this the sysctl task fails with "No such file or directory"
+    ###########################################################################
+
+    - name: Load br_netfilter kernel module
+      modprobe:
+        name: br_netfilter
+        state: present
+
+    - name: Persist br_netfilter across reboots
+      copy:
+        dest: /etc/modules-load.d/br_netfilter.conf
+        content: "br_netfilter\n"
+        mode: "0644"
+
+    - name: Set sysctl values required by kind
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: true
+      loop:
+        - { name: "net.bridge.bridge-nf-call-iptables",  value: "1" }
+        - { name: "net.bridge.bridge-nf-call-ip6tables", value: "1" }
+        - { name: "net.ipv4.ip_forward",                 value: "1" }
+
+    ###########################################################################
+    # 7. Smoke check — verify all tools are reachable
+    ###########################################################################
+
+    - name: Smoke check all installed tools
+      command: "{{ item }}"
+      loop:
+        - docker --version
+        - kind version
+        - kubectl version --client
+      register: smoke_check
+      changed_when: false
+
+    - name: Print smoke check results
+      debug:
+        msg: "{{ item.stdout }}"
+      loop: "{{ smoke_check.results }}"
+      loop_control:
+        label: "{{ item.item }}"
