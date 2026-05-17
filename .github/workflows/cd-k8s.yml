@@ -10,14 +10,124 @@ permissions:
   issues: write       # needed to create GitHub issue on failure
 
 jobs:
+
+  # ── Staging gate ─────────────────────────────────────────────────────────────
+  # Deploys to a separate namespace (skillpulse-staging) first.
+  # GitHub environment "staging" can have its own protection rules and secrets.
+  # Production job below only runs after this passes.
+  deploy-staging:
+    name: Deploy to staging namespace
+    if: |
+      github.event.workflow_run.conclusion == 'success' &&
+      vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: staging        # maps to GitHub Environment "staging"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy k8s manifests to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host:     ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          source:   "k8s/"
+          target:   "~/skillpulse-staging"
+
+      - name: Deploy to staging namespace
+        uses: appleboy/ssh-action@v1
+        env:
+          IMAGE_TAG:           ${{ github.event.workflow_run.head_sha }}
+          DOCKER_USER:         ${{ secrets.DOCKERHUB_USERNAME }}
+          MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+          MYSQL_DATABASE:      ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_USER:          ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD:      ${{ secrets.MYSQL_PASSWORD }}
+        with:
+          host:     ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          envs:     IMAGE_TAG,DOCKER_USER,MYSQL_ROOT_PASSWORD,MYSQL_DATABASE,MYSQL_USER,MYSQL_PASSWORD
+          command_timeout: 15m
+          script: |
+            set -euo pipefail
+
+            CLUSTER=skillpulse
+            NAMESPACE=skillpulse-staging
+            K8S_DIR=~/skillpulse-staging/k8s
+            IMAGE_TAG="${IMAGE_TAG::7}"
+
+            echo "=== Staging deploy: ${IMAGE_TAG} ==="
+
+            # Ensure cluster exists (created by a prior production deploy or manually)
+            if ! kind get clusters 2>/dev/null | grep -q "^${CLUSTER}$"; then
+              echo "ERROR: kind cluster '${CLUSTER}' not found. Run a production deploy first."
+              exit 1
+            fi
+
+            # Create staging namespace if it doesn't exist
+            kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+            # Inject DB secret into staging namespace
+            kubectl create secret generic skillpulse-db \
+              --namespace="$NAMESPACE" \
+              --from-literal=MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
+              --from-literal=MYSQL_DATABASE="$MYSQL_DATABASE" \
+              --from-literal=MYSQL_USER="$MYSQL_USER" \
+              --from-literal=MYSQL_PASSWORD="$MYSQL_PASSWORD" \
+              --save-config \
+              --dry-run=client -o yaml | kubectl apply -f -
+
+            # Pin images to exact SHA
+            sed -i \
+              "s|image: .*/skillpulse-backend:.*|image: ${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}|" \
+              "${K8S_DIR}/20-backend.yaml"
+            sed -i \
+              "s|image: .*/skillpulse-frontend:.*|image: ${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}|" \
+              "${K8S_DIR}/30-frontend.yaml"
+
+            # Apply core manifests into staging namespace (override namespace inline)
+            kubectl apply -f "${K8S_DIR}/10-mysql.yaml"   --namespace="$NAMESPACE"
+            kubectl apply -f "${K8S_DIR}/20-backend.yaml" --namespace="$NAMESPACE"
+            kubectl apply -f "${K8S_DIR}/30-frontend.yaml" --namespace="$NAMESPACE"
+
+            # Wait for rollouts
+            kubectl rollout status statefulset/mysql   -n "$NAMESPACE" --timeout=180s
+            kubectl rollout status deployment/backend  -n "$NAMESPACE" --timeout=120s
+            kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=60s
+
+            # Quick smoke test on staging backend
+            kubectl port-forward svc/backend 8081:8080 -n "$NAMESPACE" &
+            PF_PID=$!
+            sleep 3
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/health || true)
+            kill "$PF_PID" 2>/dev/null || true
+
+            if [ "$STATUS" != "200" ]; then
+              echo "STAGING smoke test FAILED — HTTP $STATUS"
+              kubectl get pods -n "$NAMESPACE" -o wide
+              exit 1
+            fi
+
+            echo "=== Staging smoke test PASSED — HTTP $STATUS ==="
+            echo "=== Staging deploy complete: ${IMAGE_TAG} ==="
+
+  # ── Production deploy ─────────────────────────────────────────────────────────
+  # Only runs after staging passes.
+  # GitHub environment "production" should have required reviewers configured:
+  #   Settings → Environments → production → Required reviewers
   kind-deploy:
-    name: Deploy to kind cluster on EC2
+    name: Deploy to production (kind cluster on EC2)
+    needs: deploy-staging     # staging must pass before production runs
     if: |
       github.event.workflow_run.conclusion == 'success' &&
       vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: production
+    environment: production   # triggers manual approval gate if reviewers are set
 
     steps:
       - name: Checkout code
@@ -67,6 +177,16 @@ jobs:
                 --config "${K8S_DIR}/kind-config.yaml" \
                 --name "$CLUSTER" \
                 --wait 60s
+
+              # Install metrics-server (required for HPA)
+              echo "Installing metrics-server..."
+              kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+              # Patch metrics-server to skip TLS verification in kind (no real certs)
+              kubectl patch deployment metrics-server \
+                -n kube-system \
+                --type=json \
+                -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+              kubectl rollout status deployment/metrics-server -n kube-system --timeout=60s
             fi
             kubectl get nodes
 
@@ -109,7 +229,9 @@ jobs:
               -f "${K8S_DIR}/10-mysql.yaml" \
               -f "${K8S_DIR}/20-backend.yaml" \
               -f "${K8S_DIR}/30-frontend.yaml" \
-              -f "${K8S_DIR}/50-pdb.yaml"
+              -f "${K8S_DIR}/40-network-policy.yaml" \
+              -f "${K8S_DIR}/50-pdb.yaml" \
+              -f "${K8S_DIR}/80-hpa.yaml"
 
             # ── 6. Wait for rollouts ──────────────────────────────────────────
             kubectl rollout status statefulset/mysql -n "$NAMESPACE" --timeout=180s
@@ -120,7 +242,6 @@ jobs:
             kubectl get pods,svc,endpoints -n "$NAMESPACE" -o wide
 
             # ── 7. Smart smoke test with 3 self-heal attempts ─────────────────
-            # Item 6: tries to fix itself up to 3 times before rolling back
             smoke_test() {
               local SERVICE=$1
               local URL=$2
@@ -145,7 +266,6 @@ jobs:
                   return 0
                 fi
 
-                # Self-heal: restart the deployment and try again
                 if [ "$HEAL" -lt "$MAX_HEAL" ]; then
                   echo "Self-heal attempt ${HEAL}: restarting ${SERVICE} deployment..."
                   kubectl rollout restart deployment/"${SERVICE}" -n "$NAMESPACE" 2>/dev/null || true
@@ -154,7 +274,6 @@ jobs:
                 fi
               done
 
-              # All 3 heal attempts failed
               echo "${SERVICE} SMOKE TEST FAILED after ${MAX_HEAL} self-heal attempts"
               echo "=== ${SERVICE} pod describe ==="
               kubectl describe pods -n "$NAMESPACE" -l "app=${SERVICE}" || true
@@ -176,9 +295,7 @@ jobs:
             fi
             kill "$PF_PID" 2>/dev/null || true
 
-            # ── Apply observability manifests ──────────────────────────
-            # ServiceMonitor tells Prometheus to scrape /metrics from backend
-            # Only applied if monitoring namespace exists (Ansible set it up)
+            # ── 8. Apply observability manifests ─────────────────────────────
             if kubectl get namespace monitoring &>/dev/null; then
               echo "Applying ServiceMonitor..."
               kubectl apply -f "${K8S_DIR}/60-monitoring.yaml" || true
@@ -187,9 +304,13 @@ jobs:
               echo "Run: ansible-playbook -i hosts.ini install-observability.yml"
             fi
 
+            # ── 9. Show HPA status ────────────────────────────────────────────
+            echo "=== HPA status ==="
+            kubectl get hpa -n "$NAMESPACE"
+
             echo "=== Deploy complete — ${IMAGE_TAG} ==="
 
-      # ── 8. Rollback + alert on failure — Item 6 ───────────────────────────
+      # ── Rollback + alert on failure ───────────────────────────────────────
       - name: Rollback deployments on failure
         if: failure()
         uses: appleboy/ssh-action@v1

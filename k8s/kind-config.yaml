@@ -1,6 +1,19 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: skillpulse
+
+# Enable metrics-server feature gates — required for HPA to read CPU/memory metrics.
+# Without this HPA shows "<unknown>/60%" and never scales.
+kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    controllerManager:
+      extraArgs:
+        horizontal-pod-autoscaler-sync-period: "15s"
+  - |
+    kind: KubeletConfiguration
+    serverTLSBootstrap: true
+
 nodes:
   - role: control-plane
     image: kindest/node:v1.35.1
@@ -8,10 +21,19 @@ nodes:
       - containerPort: 30080
         hostPort: 8888
         protocol: TCP
-      - containerPort: 30030    # ← add this
+      - containerPort: 30030
         hostPort: 3000
         protocol: TCP
+    # metrics-server needs kubelet to serve resource metrics
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+
   - role: worker
     image: kindest/node:v1.35.1
+
   - role: worker
     image: kindest/node:v1.35.1

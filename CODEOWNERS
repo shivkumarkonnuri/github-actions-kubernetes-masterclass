@@ -1,0 +1,37 @@
+# CODEOWNERS — enforces mandatory code review before merge to main.
+#
+# How it works:
+#   GitHub automatically requests a review from the listed owner(s)
+#   whenever a PR touches matching files. With branch protection enabled
+#   (Settings → Branches → main → Require review from Code Owners),
+#   the PR cannot be merged until the owner approves.
+#
+# Setup steps:
+#   1. Replace YOUR_GITHUB_USERNAME below with your GitHub username.
+#   2. Go to Settings → Branches → main → Edit protection rule.
+#   3. Enable "Require a pull request before merging".
+#   4. Enable "Require review from Code Owners".
+#   5. Set "Required approvals" to 1.
+
+# Default: all files require review
+*                              @YOUR_GITHUB_USERNAME
+
+# CI/CD workflows — any pipeline change needs extra scrutiny
+.github/workflows/             @YOUR_GITHUB_USERNAME
+
+# Kubernetes manifests — production infra changes need sign-off
+k8s/                           @YOUR_GITHUB_USERNAME
+
+# Terraform — cloud infra changes need sign-off
+terraform/                     @YOUR_GITHUB_USERNAME
+
+# Ansible — server provisioning changes need sign-off
+ansible/                       @YOUR_GITHUB_USERNAME
+
+# Backend application code
+backend/                       @YOUR_GITHUB_USERNAME
+
+# Dockerfile changes — security-sensitive
+backend/Dockerfile             @YOUR_GITHUB_USERNAME
+frontend/Dockerfile            @YOUR_GITHUB_USERNAME
+
