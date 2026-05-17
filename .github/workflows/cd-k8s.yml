@@ -333,3 +333,5 @@ jobs:
             kubectl get hpa -n "$NAMESPACE"
 
             echo "=== Deploy complete — ${IMAGE_TAG} ==="
+
+
