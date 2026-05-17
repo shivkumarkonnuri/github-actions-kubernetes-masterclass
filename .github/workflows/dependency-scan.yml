@@ -22,12 +22,11 @@ jobs:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
-      # Download all dependencies first so govulncheck and Nancy
-      # can resolve imports — without this both tools fail with
-      # "missing go.sum entry" errors
-      - name: Download Go modules
+      # go mod tidy downloads all deps AND regenerates go.sum
+      # govulncheck and Nancy both need go.sum to be complete
+      - name: Tidy Go modules
         working-directory: backend
-        run: go mod download
+        run: go mod tidy
 
       - name: govulncheck - Go stdlib and module vulnerabilities
         working-directory: backend
