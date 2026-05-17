@@ -5,7 +5,6 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny-all
-  namespace: skillpulse
 spec:
   podSelector: {}   # matches every pod in the namespace
   policyTypes:
@@ -17,7 +16,6 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-frontend-to-backend
-  namespace: skillpulse
 spec:
   podSelector:
     matchLabels:
@@ -38,7 +36,6 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-backend-to-mysql
-  namespace: skillpulse
 spec:
   podSelector:
     matchLabels:
@@ -59,7 +56,6 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-backend-egress-mysql
-  namespace: skillpulse
 spec:
   podSelector:
     matchLabels:
