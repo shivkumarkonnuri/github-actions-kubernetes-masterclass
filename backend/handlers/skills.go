@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"logs"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -21,7 +22,12 @@ func GetSkills(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	defer rows.Close()
+
+	defer func() {
+    	   if err := rows.Close(); err != nil {
+        	log.Printf("error closing rows: %v", err)
+    	   }
+	}()
 
 	skills := []models.Skill{}
 	for rows.Next() {

@@ -11,10 +11,18 @@ import (
 func GetDashboard(c *gin.Context) {
 	var dash models.Dashboard
 
-	database.DB.QueryRow("SELECT COUNT(*) FROM skills").Scan(&dash.TotalSkills)
-	database.DB.QueryRow("SELECT COALESCE(SUM(hours), 0) FROM learning_logs").Scan(&dash.TotalHours)
-	database.DB.QueryRow("SELECT COUNT(*) FROM learning_logs").Scan(&dash.TotalLogs)
-
+	if err := database.DB.QueryRow("SELECT COUNT(*) FROM skills").Scan(&dash.TotalSkills); err != nil {
+ 	   c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+    	   return
+	}
+	if err := database.DB.QueryRow("SELECT COALESCE(SUM(hours), 0) FROM learning_logs").Scan(&dash.TotalHours); err != nil {
+    	   c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+    	   return
+	}
+	if err := database.DB.QueryRow("SELECT COUNT(*) FROM learning_logs").Scan(&dash.TotalLogs); err != nil {
+           c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+    	   return
+	}
 	err := database.DB.QueryRow(`
 		SELECT s.name FROM skills s
 		LEFT JOIN learning_logs l ON s.id = l.skill_id
