@@ -7,7 +7,6 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: backend
-  namespace: skillpulse
   labels:
     app: backend
     release: prometheus     # must match prometheusSelector in Prometheus CR
@@ -27,7 +26,6 @@ apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: backend-alerts
-  namespace: skillpulse
   labels:
     release: prometheus
 spec:
