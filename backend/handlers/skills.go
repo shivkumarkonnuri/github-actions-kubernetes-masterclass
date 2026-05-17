@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"logs"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
