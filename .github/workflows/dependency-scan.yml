@@ -1,6 +1,6 @@
 name: "Dependency Scan"
 
-on: 
+on:
   workflow_call:
 
 permissions:
@@ -9,18 +9,25 @@ permissions:
 jobs:
   dependency-scan:
     name: Dependency scan (govulncheck + Nancy)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
-    
+
     steps:
-      - name: Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Go
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
+
+      # Download all dependencies first so govulncheck and Nancy
+      # can resolve imports — without this both tools fail with
+      # "missing go.sum entry" errors
+      - name: Download Go modules
+        working-directory: backend
+        run: go mod download
 
       - name: govulncheck - Go stdlib and module vulnerabilities
         working-directory: backend
