@@ -14,35 +14,16 @@ permissions:
 
 jobs:
 
-  # ── Shared Go module cache ──────────────────────────────────────────────────
-  # Warms the GHA Go cache once so code-quality and dependency-scan
-  # both restore from it instead of each downloading modules independently.
-  go-cache:
-    name: Warm Go module cache
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Setup Go (warm cache)
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
-      - name: Download modules
-        working-directory: backend
-        run: go mod download
-
   # ── Static analysis / scan jobs (all run in parallel) ──────────────────────
+  # actions/setup-go restores the module cache automatically on every run
+  # (keyed on go.sum), so a separate warm-cache job is not needed.
   code-quality:
-    needs: [go-cache]
     uses: ./.github/workflows/code-quality.yml
 
   secrets-scan:
     uses: ./.github/workflows/secrets-scan.yml
 
   dependency-scan:
-    needs: [go-cache]
     uses: ./.github/workflows/dependency-scan.yml
     secrets: inherit
 

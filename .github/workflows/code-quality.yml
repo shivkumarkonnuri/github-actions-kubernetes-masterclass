@@ -28,3 +28,4 @@ jobs:
           version: v2.12.2
           working-directory: backend
           args: --timeout=5m
+          cache: true
