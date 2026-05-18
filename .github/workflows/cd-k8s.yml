@@ -212,7 +212,7 @@ jobs:
                 sleep 5
                 continue
               fi
-              FRONT_STATUS=$(docker exec sp-cluster-control-plane                 curl -s -o /dev/null -w "%{http_code}" --max-time 5                 "http://${FRONTEND_IP}:80" || true)
+              FRONT_STATUS=$(docker exec sp-cluster-control-plane                 curl -s -o /dev/null -w "%{http_code}" --max-time 5                 "http://${FRONTEND_IP}:8080/" || true)
               echo "Attempt $i: HTTP $FRONT_STATUS"
               if [ "$FRONT_STATUS" = "200" ]; then
                 echo "STAGING frontend smoke test PASSED"
