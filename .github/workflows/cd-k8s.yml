@@ -153,11 +153,16 @@ jobs:
               "${K8S_DIR}/30-frontend.yaml"
 
             # Apply manifests
+            # Frontend nodePort is set dynamically per environment:
+            #   Staging:    30081 → hostPort 8889 → http://<EC2-IP>:8889
+            #   Production: 30080 → hostPort 8888 → http://<EC2-IP>:8888
             kubectl apply --validate=false \
               -f "${K8S_DIR}/10-mysql.yaml" \
               -f "${K8S_DIR}/20-backend.yaml" \
               -n "$NAMESPACE"
-            sed 's/nodePort: 30080/nodePort: 30081/' "${K8S_DIR}/30-frontend.yaml" \
+            # Remove any existing nodePort then inject 30081 for staging
+            sed '/nodePort:/d' "${K8S_DIR}/30-frontend.yaml" \
+              | sed '/port: 8080/{n;s/.*/      nodePort: 30081/;t;s/$/\n      nodePort: 30081/}' \
               | kubectl apply --validate=false -n "$NAMESPACE" -f -
 
             echo "Waiting for pods..."
@@ -308,10 +313,14 @@ jobs:
               --save-config \
               --dry-run=client -o yaml | kubectl apply -f -
 
+            # Remove any existing nodePort then inject 30080 for production
+            sed '/nodePort:/d' "${K8S_DIR}/30-frontend.yaml" \
+              | sed '/port: 8080/{n;s/.*/      nodePort: 30080/;t;s/$/\n      nodePort: 30080/}' \
+              > /tmp/frontend-prod.yaml
             kubectl apply --validate=false \
               -f "${K8S_DIR}/10-mysql.yaml" \
               -f "${K8S_DIR}/20-backend.yaml" \
-              -f "${K8S_DIR}/30-frontend.yaml" \
+              -f /tmp/frontend-prod.yaml \
               -f "${K8S_DIR}/40-network-policy.yaml" \
               -f "${K8S_DIR}/50-pdb.yaml" \
               -f "${K8S_DIR}/80-hpa.yaml"

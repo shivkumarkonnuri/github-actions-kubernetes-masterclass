@@ -5,7 +5,6 @@ metadata:
   name: frontend
   labels:
     app: frontend
-    environment: staging
 spec:
   type: NodePort
   selector:
@@ -13,17 +12,12 @@ spec:
   ports:
     - name: http
       port: 8080
-      targetPort: 8080
-      # Fixed NodePort — maps to hostPort 8889 via kind-config.yaml extraPortMappings
-      # Access: http://<EC2-IP>:8889
-      nodePort: 30081
+      targetPort: 8080   # updated: nginx-unprivileged listens on 8080
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: frontend
-  labels:
-    environment: staging
 spec:
   replicas: 1
   selector:
@@ -33,12 +27,11 @@ spec:
     metadata:
       labels:
         app: frontend
-        environment: staging
     spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
-        runAsUser: 101
+        runAsUser: 101       # uid 101 = nginx in nginxinc/nginx-unprivileged
         runAsGroup: 101
         fsGroup: 101
         seccompProfile:
@@ -55,7 +48,7 @@ spec:
               cpu: 50m
               memory: 32Mi
             limits:
-              cpu: 100m
+              cpu: 100m      # added: prevents runaway CPU usage
               memory: 64Mi
           securityContext:
             allowPrivilegeEscalation: false
@@ -64,6 +57,7 @@ spec:
             runAsUser: 101
             capabilities:
               drop: ["ALL"]
+          # nginx-unprivileged needs writable cache and pid dirs
           volumeMounts:
             - name: nginx-cache
               mountPath: /var/cache/nginx
