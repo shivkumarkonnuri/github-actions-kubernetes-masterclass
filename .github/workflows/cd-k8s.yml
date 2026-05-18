@@ -166,14 +166,14 @@ jobs:
             kubectl rollout status deployment/backend  -n "$NAMESPACE" --timeout=300s
             kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=180s
 
-            # Smoke tests via pod IP — avoids port-forward TLS issues in multi-node kind
-            # Pod IPs are directly reachable from the EC2 host via kind's docker bridge network
+            # Smoke tests via kubectl run — spins up a curl pod inside the cluster
+            # This avoids port-forward TLS issues and pod IP unreachability
+            # Service DNS works inside the cluster: svc-name.namespace.svc.cluster.local
 
-            # Backend smoke test
-            BACKEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=backend               -o jsonpath='{.items[0].status.podIP}')
-            echo "Testing backend at pod IP: $BACKEND_IP"
+            # Backend smoke test via in-cluster curl pod
+            echo "Running backend smoke test via in-cluster curl..."
             for i in $(seq 1 6); do
-              STATUS=$(curl -s -o /dev/null -w "%{http_code}"                 --max-time 5 "http://${BACKEND_IP}:8080/health" || echo "000")
+              STATUS=$(kubectl run smoke-backend-${i}                 --image=curlimages/curl:latest                 --restart=Never                 --rm                 -i                 --timeout=30s                 -n "$NAMESPACE"                 -- curl -s -o /dev/null -w "%{http_code}"                    http://backend.${NAMESPACE}.svc.cluster.local:8080/health                 2>/dev/null || echo "000")
               if [ "$STATUS" = "200" ]; then
                 echo "STAGING backend smoke test PASSED — HTTP $STATUS"
                 break
@@ -188,11 +188,10 @@ jobs:
               fi
             done
 
-            # Frontend smoke test
-            FRONTEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=frontend               -o jsonpath='{.items[0].status.podIP}')
-            echo "Testing frontend at pod IP: $FRONTEND_IP"
+            # Frontend smoke test via in-cluster curl pod
+            echo "Running frontend smoke test via in-cluster curl..."
             for i in $(seq 1 6); do
-              FRONT_STATUS=$(curl -s -o /dev/null -w "%{http_code}"                 --max-time 5 "http://${FRONTEND_IP}:80" || echo "000")
+              FRONT_STATUS=$(kubectl run smoke-frontend-${i}                 --image=curlimages/curl:latest                 --restart=Never                 --rm                 -i                 --timeout=30s                 -n "$NAMESPACE"                 -- curl -s -o /dev/null -w "%{http_code}"                    http://frontend.${NAMESPACE}.svc.cluster.local:80                 2>/dev/null || echo "000")
               if [ "$FRONT_STATUS" = "200" ]; then
                 echo "STAGING frontend smoke test PASSED — HTTP $FRONT_STATUS"
                 break
