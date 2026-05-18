@@ -167,12 +167,8 @@ jobs:
             kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=180s
 
             # ── Smoke tests ────────────────────────────────────────────────
-            # Uses docker exec on the kind control-plane container.
-            # The control-plane has direct CNI access to all pod IPs across
-            # all worker nodes — no TLS proxy, no port-forward needed.
-            # curl is present in kindest/node images.
-            # "|| true" prevents the curl exit code from killing the script
-            # under set -euo pipefail; we check the HTTP status ourselves.
+            # Staging has no network policies so docker exec on the
+            # control-plane container reaches pod IPs directly via CNI.
 
             # Backend smoke test
             echo "Running staging backend smoke test..."
@@ -330,32 +326,32 @@ jobs:
             kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=180s &
             wait
 
-            kubectl get pods,svc,endpoints -n "$NAMESPACE" -o wide
+            kubectl get pods,svc -n "$NAMESPACE" -o wide
 
             # ── Smoke tests ────────────────────────────────────────────────
-            # Uses docker exec on the kind control-plane container.
-            # kubectl port-forward proxies through the API server TLS endpoint
-            # (172.18.0.x:10250). In a multi-node kind cluster the API server
-            # TLS cert does not cover worker node IPs, causing:
-            #   "remote error: tls: internal error"
-            # docker exec bypasses all of that — the control-plane container
-            # has direct CNI (kindnet) access to every pod IP in the cluster.
+            # Production has default-deny-all network policy which blocks
+            # docker exec from control-plane reaching pod IPs.
+            # NodePort services are reachable directly from the EC2 host via
+            # the Docker bridge IP of any worker node — no TLS, no proxy,
+            # not affected by network policies (NodePort traffic enters via
+            # kube-proxy on the node, which is outside pod-level netpol).
+            # Frontend NodePort: 31427, Backend NodePort: 30808 (fixed in manifest)
+
+            NODE_IP=$(kubectl get node sp-cluster-worker \
+              -o jsonpath='{.status.addresses[0].address}')
+            FRONTEND_NP=$(kubectl get svc frontend -n "$NAMESPACE" \
+              -o jsonpath='{.spec.ports[0].nodePort}')
+            BACKEND_NP=$(kubectl get svc backend -n "$NAMESPACE" \
+              -o jsonpath='{.spec.ports[0].nodePort}')
+
+            echo "Node IP: $NODE_IP  Frontend NodePort: $FRONTEND_NP  Backend NodePort: $BACKEND_NP"
 
             # Frontend smoke test
             echo "Running production frontend smoke test..."
             FRONTEND_PASSED=false
             for i in $(seq 1 6); do
-              FRONTEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=frontend \
-                -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo "")
-              echo "Attempt $i: frontend pod IP = $FRONTEND_IP"
-              if [ -z "$FRONTEND_IP" ]; then
-                echo "No pod IP yet — retrying in 5s..."
-                sleep 5
-                continue
-              fi
-              FRONT_STATUS=$(docker exec sp-cluster-control-plane \
-                curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-                "http://${FRONTEND_IP}:8080/" || true)
+              FRONT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+                "http://${NODE_IP}:${FRONTEND_NP}/" || true)
               echo "Attempt $i: HTTP $FRONT_STATUS"
               if [ "$FRONT_STATUS" = "200" ]; then
                 echo "PRODUCTION frontend smoke test PASSED"
@@ -367,7 +363,6 @@ jobs:
             if [ "$FRONTEND_PASSED" != "true" ]; then
               echo "PRODUCTION frontend smoke test FAILED"
               kubectl get pods -n "$NAMESPACE" -o wide
-              kubectl logs -n "$NAMESPACE" -l app=frontend --tail=50 || true
               exit 1
             fi
 
@@ -375,17 +370,8 @@ jobs:
             echo "Running production backend smoke test..."
             BACKEND_PASSED=false
             for i in $(seq 1 6); do
-              BACKEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=backend \
-                -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo "")
-              echo "Attempt $i: backend pod IP = $BACKEND_IP"
-              if [ -z "$BACKEND_IP" ]; then
-                echo "No pod IP yet — retrying in 5s..."
-                sleep 5
-                continue
-              fi
-              BACK_STATUS=$(docker exec sp-cluster-control-plane \
-                curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-                "http://${BACKEND_IP}:8080/health" || true)
+              BACK_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+                "http://${NODE_IP}:${BACKEND_NP}/health" || true)
               echo "Attempt $i: HTTP $BACK_STATUS"
               if [ "$BACK_STATUS" = "200" ]; then
                 echo "PRODUCTION backend smoke test PASSED"
@@ -397,7 +383,6 @@ jobs:
             if [ "$BACKEND_PASSED" != "true" ]; then
               echo "PRODUCTION backend smoke test FAILED"
               kubectl get pods -n "$NAMESPACE" -o wide
-              kubectl logs -n "$NAMESPACE" -l app=backend --tail=50 || true
               exit 1
             fi
 
