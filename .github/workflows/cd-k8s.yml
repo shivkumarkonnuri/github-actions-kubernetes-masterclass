@@ -166,12 +166,14 @@ jobs:
             kubectl rollout status deployment/backend  -n "$NAMESPACE" --timeout=300s
             kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=180s
 
+            # Smoke tests via pod IP — avoids port-forward TLS issues in multi-node kind
+            # Pod IPs are directly reachable from the EC2 host via kind's docker bridge network
+
             # Backend smoke test
-            # Use exec instead of port-forward to avoid TLS issues in multi-node kind
-            BACKEND_POD=$(kubectl get pod -n "$NAMESPACE" -l app=backend -o jsonpath='{.items[0].metadata.name}')
-            echo "Testing backend via exec: $BACKEND_POD"
+            BACKEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=backend               -o jsonpath='{.items[0].status.podIP}')
+            echo "Testing backend at pod IP: $BACKEND_IP"
             for i in $(seq 1 6); do
-              STATUS=$(kubectl exec -n "$NAMESPACE" "$BACKEND_POD" --                 wget -qO- --server-response http://localhost:8080/health 2>&1 | grep "HTTP/" | awk '{print $2}' || echo "000")
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}"                 --max-time 5 "http://${BACKEND_IP}:8080/health" || echo "000")
               if [ "$STATUS" = "200" ]; then
                 echo "STAGING backend smoke test PASSED — HTTP $STATUS"
                 break
@@ -181,16 +183,16 @@ jobs:
               if [ "$i" = "6" ]; then
                 echo "STAGING backend smoke test FAILED — HTTP $STATUS"
                 kubectl get pods -n "$NAMESPACE" -o wide
-                kubectl logs -n "$NAMESPACE" "$BACKEND_POD" --tail=30
+                kubectl logs -n "$NAMESPACE" -l app=backend --tail=30 || true
                 exit 1
               fi
             done
 
             # Frontend smoke test
-            FRONTEND_POD=$(kubectl get pod -n "$NAMESPACE" -l app=frontend -o jsonpath='{.items[0].metadata.name}')
-            echo "Testing frontend via exec: $FRONTEND_POD"
+            FRONTEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=frontend               -o jsonpath='{.items[0].status.podIP}')
+            echo "Testing frontend at pod IP: $FRONTEND_IP"
             for i in $(seq 1 6); do
-              FRONT_STATUS=$(kubectl exec -n "$NAMESPACE" "$FRONTEND_POD" --                 wget -qO- --server-response http://localhost:80 2>&1 | grep "HTTP/" | awk '{print $2}' || echo "000")
+              FRONT_STATUS=$(curl -s -o /dev/null -w "%{http_code}"                 --max-time 5 "http://${FRONTEND_IP}:80" || echo "000")
               if [ "$FRONT_STATUS" = "200" ]; then
                 echo "STAGING frontend smoke test PASSED — HTTP $FRONT_STATUS"
                 break
