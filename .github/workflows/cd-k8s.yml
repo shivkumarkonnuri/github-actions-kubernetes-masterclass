@@ -298,7 +298,10 @@ jobs:
               "s|image: .*/skillpulse-frontend:.*|image: ${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}|" \
               "${K8S_DIR}/30-frontend.yaml"
 
+
             kubectl apply --validate=false -f "${K8S_DIR}/00-namespace.yaml"
+            kubectl delete svc backend -n "$NAMESPACE" --ignore-not-found=true
+
 
             kubectl create secret generic skillpulse-db \
               --namespace="$NAMESPACE" \
