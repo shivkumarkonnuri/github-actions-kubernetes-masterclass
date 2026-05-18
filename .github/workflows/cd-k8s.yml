@@ -307,7 +307,7 @@ jobs:
               --save-config \
               --dry-run=client -o yaml | kubectl apply -f -
 
-            kubectl apply --validate=false \
+            kubectl apply --validate=false -n "$NAMESPACE" \
               -f "${K8S_DIR}/10-mysql.yaml" \
               -f "${K8S_DIR}/20-backend.yaml" \
               -f "${K8S_DIR}/30-frontend.yaml" \
