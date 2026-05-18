@@ -45,7 +45,7 @@ jobs:
           script: |
             set -euo pipefail
 
-            CLUSTER=skillpulse
+            CLUSTER=sp-cluster
             K8S_DIR=~/skillpulse/k8s
 
             if kind get clusters 2>/dev/null | grep -q "^${CLUSTER}$"; then
@@ -80,7 +80,6 @@ jobs:
     needs: cluster-setup
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    environment: staging
 
     steps:
       - name: Checkout code
@@ -113,7 +112,7 @@ jobs:
           script: |
             set -euo pipefail
 
-            CLUSTER=skillpulse
+            CLUSTER=sp-cluster
             NAMESPACE=skillpulse-staging
             K8S_DIR=~/skillpulse-staging/k8s
             IMAGE_TAG="${IMAGE_TAG::7}"
@@ -236,7 +235,7 @@ jobs:
           script: |
             set -euo pipefail
 
-            CLUSTER=skillpulse
+            CLUSTER=sp-cluster
             NAMESPACE=skillpulse
             K8S_DIR=~/skillpulse/k8s
             IMAGE_TAG="${IMAGE_TAG::7}"
@@ -425,5 +424,3 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
-
-
