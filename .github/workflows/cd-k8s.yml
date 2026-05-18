@@ -167,30 +167,42 @@ jobs:
             kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=180s
 
             # Backend smoke test
-            kubectl port-forward svc/backend 8081:8080 -n "$NAMESPACE" &
-            PF_BACK_PID=$!
-            sleep 5
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/health || true)
-            kill "$PF_BACK_PID" 2>/dev/null || true
-
-            if [ "$STATUS" != "200" ]; then
-              echo "STAGING backend smoke test FAILED — HTTP $STATUS"
-              kubectl get pods -n "$NAMESPACE" -o wide
-              exit 1
-            fi
+            # Use exec instead of port-forward to avoid TLS issues in multi-node kind
+            BACKEND_POD=$(kubectl get pod -n "$NAMESPACE" -l app=backend -o jsonpath='{.items[0].metadata.name}')
+            echo "Testing backend via exec: $BACKEND_POD"
+            for i in $(seq 1 6); do
+              STATUS=$(kubectl exec -n "$NAMESPACE" "$BACKEND_POD" --                 wget -qO- --server-response http://localhost:8080/health 2>&1 | grep "HTTP/" | awk '{print $2}' || echo "000")
+              if [ "$STATUS" = "200" ]; then
+                echo "STAGING backend smoke test PASSED — HTTP $STATUS"
+                break
+              fi
+              echo "Attempt $i: HTTP $STATUS — retrying in 5s..."
+              sleep 5
+              if [ "$i" = "6" ]; then
+                echo "STAGING backend smoke test FAILED — HTTP $STATUS"
+                kubectl get pods -n "$NAMESPACE" -o wide
+                kubectl logs -n "$NAMESPACE" "$BACKEND_POD" --tail=30
+                exit 1
+              fi
+            done
 
             # Frontend smoke test
-            kubectl port-forward svc/frontend 8082:80 -n "$NAMESPACE" &
-            PF_FRONT_PID=$!
-            sleep 5
-            FRONT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8082 || true)
-            kill "$PF_FRONT_PID" 2>/dev/null || true
-
-            if [ "$FRONT_STATUS" != "200" ]; then
-              echo "STAGING frontend smoke test FAILED — HTTP $FRONT_STATUS"
-              kubectl get pods -n "$NAMESPACE" -o wide
-              exit 1
-            fi
+            FRONTEND_POD=$(kubectl get pod -n "$NAMESPACE" -l app=frontend -o jsonpath='{.items[0].metadata.name}')
+            echo "Testing frontend via exec: $FRONTEND_POD"
+            for i in $(seq 1 6); do
+              FRONT_STATUS=$(kubectl exec -n "$NAMESPACE" "$FRONTEND_POD" --                 wget -qO- --server-response http://localhost:80 2>&1 | grep "HTTP/" | awk '{print $2}' || echo "000")
+              if [ "$FRONT_STATUS" = "200" ]; then
+                echo "STAGING frontend smoke test PASSED — HTTP $FRONT_STATUS"
+                break
+              fi
+              echo "Attempt $i: HTTP $FRONT_STATUS — retrying in 5s..."
+              sleep 5
+              if [ "$i" = "6" ]; then
+                echo "STAGING frontend smoke test FAILED — HTTP $FRONT_STATUS"
+                kubectl get pods -n "$NAMESPACE" -o wide
+                exit 1
+              fi
+            done
 
             echo "=== Staging smoke tests PASSED ==="
             echo "=== Staging deploy complete: ${IMAGE_TAG} ==="
