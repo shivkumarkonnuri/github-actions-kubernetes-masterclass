@@ -1,7 +1,12 @@
+###############################################################################
+# variables.tf — Input variable declarations
+# Set values in terraform.tfvars (never commit that file)
+###############################################################################
+
 variable "aws_region" {
   description = "AWS region to deploy into"
   type        = string
-  default     = "us-west-2"
+  default     = "ap-south-1"
 }
 
 variable "project" {
@@ -58,8 +63,14 @@ variable "my_ip" {
 }
 
 variable "app_port" {
-  description = "Host port that kind maps NodePort 30080 to (from kind-config.yaml)"
+  description = "Host port that kind maps production NodePort 30080 to"
   type        = number
   default     = 8888
+}
+
+variable "staging_port" {
+  description = "Host port that kind maps staging NodePort 30081 to"
+  type        = number
+  default     = 8889
 }
 

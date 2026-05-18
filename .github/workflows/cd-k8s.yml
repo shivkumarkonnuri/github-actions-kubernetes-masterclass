@@ -156,7 +156,7 @@ jobs:
             kubectl apply --validate=false \
               -f "${K8S_DIR}/10-mysql.yaml" \
               -f "${K8S_DIR}/20-backend.yaml" \
-              -f "${K8S_DIR}/30-frontend.yaml" \
+              -f "${K8S_DIR}/staging/30-frontend.yaml" \
               -n "$NAMESPACE"
 
             echo "Waiting for pods..."
@@ -166,25 +166,26 @@ jobs:
             kubectl rollout status deployment/backend  -n "$NAMESPACE" --timeout=300s
             kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=180s
 
-            # ── Smoke tests ────────────────────────────────────────────────
-            # Staging has no network policies so docker exec on the
-            # control-plane container reaches pod IPs directly via CNI.
+            # Smoke tests using docker exec on kind control-plane container
+            # control-plane has direct CNI access to all pod IPs across all nodes
+            # Pod IP is fetched fresh inside each retry loop to handle new deployments
+
+            # Smoke tests using curl via docker exec on kind control-plane container
+            # control-plane has direct CNI access to all pod IPs across all nodes
+            # curl is available in kindest/node images, || true prevents exit code leaking
 
             # Backend smoke test
-            echo "Running staging backend smoke test..."
+            echo "Running backend smoke test..."
             BACKEND_PASSED=false
             for i in $(seq 1 6); do
-              BACKEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=backend \
-                -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo "")
+              BACKEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=backend                 -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo "")
               echo "Attempt $i: backend pod IP = $BACKEND_IP"
               if [ -z "$BACKEND_IP" ]; then
                 echo "No pod IP yet — retrying in 5s..."
                 sleep 5
                 continue
               fi
-              STATUS=$(docker exec sp-cluster-control-plane \
-                curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-                "http://${BACKEND_IP}:8080/health" || true)
+              STATUS=$(docker exec sp-cluster-control-plane                 curl -s -o /dev/null -w "%{http_code}" --max-time 5                 "http://${BACKEND_IP}:8080/health" || true)
               echo "Attempt $i: HTTP $STATUS"
               if [ "$STATUS" = "200" ]; then
                 echo "STAGING backend smoke test PASSED"
@@ -201,20 +202,17 @@ jobs:
             fi
 
             # Frontend smoke test
-            echo "Running staging frontend smoke test..."
+            echo "Running frontend smoke test..."
             FRONTEND_PASSED=false
             for i in $(seq 1 6); do
-              FRONTEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=frontend \
-                -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo "")
+              FRONTEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=frontend                 -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo "")
               echo "Attempt $i: frontend pod IP = $FRONTEND_IP"
               if [ -z "$FRONTEND_IP" ]; then
                 echo "No pod IP yet — retrying in 5s..."
                 sleep 5
                 continue
               fi
-              FRONT_STATUS=$(docker exec sp-cluster-control-plane \
-                curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-                "http://${FRONTEND_IP}:8080/" || true)
+              FRONT_STATUS=$(docker exec sp-cluster-control-plane                 curl -s -o /dev/null -w "%{http_code}" --max-time 5                 "http://${FRONTEND_IP}:8080" || true)
               echo "Attempt $i: HTTP $FRONT_STATUS"
               if [ "$FRONT_STATUS" = "200" ]; then
                 echo "STAGING frontend smoke test PASSED"
@@ -298,10 +296,7 @@ jobs:
               "s|image: .*/skillpulse-frontend:.*|image: ${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}|" \
               "${K8S_DIR}/30-frontend.yaml"
 
-
             kubectl apply --validate=false -f "${K8S_DIR}/00-namespace.yaml"
-            kubectl delete svc backend -n "$NAMESPACE" --ignore-not-found=true
-
 
             kubectl create secret generic skillpulse-db \
               --namespace="$NAMESPACE" \
@@ -312,7 +307,7 @@ jobs:
               --save-config \
               --dry-run=client -o yaml | kubectl apply -f -
 
-            kubectl apply --validate=false -n "$NAMESPACE" \
+            kubectl apply --validate=false \
               -f "${K8S_DIR}/10-mysql.yaml" \
               -f "${K8S_DIR}/20-backend.yaml" \
               -f "${K8S_DIR}/30-frontend.yaml" \
@@ -329,65 +324,64 @@ jobs:
             kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=180s &
             wait
 
-            kubectl get pods,svc -n "$NAMESPACE" -o wide
+            kubectl get pods,svc,endpoints -n "$NAMESPACE" -o wide
 
-            # ── Smoke tests ────────────────────────────────────────────────
-            # Production has default-deny-all network policy which blocks
-            # docker exec from control-plane reaching pod IPs.
-            # NodePort services are reachable directly from the EC2 host via
-            # the Docker bridge IP of any worker node — no TLS, no proxy,
-            # not affected by network policies (NodePort traffic enters via
-            # kube-proxy on the node, which is outside pod-level netpol).
-            # Frontend NodePort: 31427, Backend NodePort: 30808 (fixed in manifest)
+            smoke_test() {
+              local SERVICE=$1
+              local URL=$2
+              local MAX_HEAL=3
 
-            NODE_IP=$(kubectl get node sp-cluster-worker \
-              -o jsonpath='{.status.addresses[0].address}')
-            FRONTEND_NP=$(kubectl get svc frontend -n "$NAMESPACE" \
-              -o jsonpath='{.spec.ports[0].nodePort}')
-            BACKEND_NP=$(kubectl get svc backend -n "$NAMESPACE" \
-              -o jsonpath='{.spec.ports[0].nodePort}')
+              for HEAL in $(seq 1 $MAX_HEAL); do
+                echo "--- Smoke test attempt ${HEAL}/${MAX_HEAL} for ${SERVICE} ---"
+                PASSED=false
 
-            echo "Node IP: $NODE_IP  Frontend NodePort: $FRONTEND_NP  Backend NodePort: $BACKEND_NP"
+                for POLL in $(seq 1 6); do
+                  STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
+                  if [ "$STATUS" = "200" ]; then
+                    echo "${SERVICE} smoke test PASSED — HTTP $STATUS"
+                    PASSED=true
+                    break
+                  fi
+                  echo "Poll ${POLL}/6: HTTP $STATUS — waiting 5s..."
+                  sleep 5
+                done
+
+                if [ "$PASSED" = "true" ]; then
+                  return 0
+                fi
+
+                if [ "$HEAL" -lt "$MAX_HEAL" ]; then
+                  echo "Restarting ${SERVICE}..."
+                  kubectl rollout restart deployment/"${SERVICE}" -n "$NAMESPACE" || true
+                  kubectl rollout status deployment/"${SERVICE}" -n "$NAMESPACE" --timeout=120s || true
+                  sleep 5
+                fi
+              done
+
+              kubectl describe pods -n "$NAMESPACE" -l "app=${SERVICE}" || true
+              kubectl logs -n "$NAMESPACE" -l "app=${SERVICE}" --tail=50 || true
+              return 1
+            }
 
             # Frontend smoke test
-            echo "Running production frontend smoke test..."
-            FRONTEND_PASSED=false
-            for i in $(seq 1 6); do
-              FRONT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-                "http://${NODE_IP}:${FRONTEND_NP}/" || true)
-              echo "Attempt $i: HTTP $FRONT_STATUS"
-              if [ "$FRONT_STATUS" = "200" ]; then
-                echo "PRODUCTION frontend smoke test PASSED"
-                FRONTEND_PASSED=true
-                break
-              fi
-              sleep 5
-            done
-            if [ "$FRONTEND_PASSED" != "true" ]; then
-              echo "PRODUCTION frontend smoke test FAILED"
-              kubectl get pods -n "$NAMESPACE" -o wide
+            kubectl port-forward svc/frontend 8888:8080 -n "$NAMESPACE" &
+            PF_FRONT_PID=$!
+            sleep 5
+            if ! smoke_test "frontend" "http://localhost:8888"; then
+              kill "$PF_FRONT_PID" 2>/dev/null || true
               exit 1
             fi
+            kill "$PF_FRONT_PID" 2>/dev/null || true
 
             # Backend smoke test
-            echo "Running production backend smoke test..."
-            BACKEND_PASSED=false
-            for i in $(seq 1 6); do
-              BACK_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-                "http://${NODE_IP}:${BACKEND_NP}/health" || true)
-              echo "Attempt $i: HTTP $BACK_STATUS"
-              if [ "$BACK_STATUS" = "200" ]; then
-                echo "PRODUCTION backend smoke test PASSED"
-                BACKEND_PASSED=true
-                break
-              fi
-              sleep 5
-            done
-            if [ "$BACKEND_PASSED" != "true" ]; then
-              echo "PRODUCTION backend smoke test FAILED"
-              kubectl get pods -n "$NAMESPACE" -o wide
+            kubectl port-forward svc/backend 8080:8080 -n "$NAMESPACE" &
+            PF_BACK_PID=$!
+            sleep 5
+            if ! smoke_test "backend" "http://localhost:8080/health"; then
+              kill "$PF_BACK_PID" 2>/dev/null || true
               exit 1
             fi
+            kill "$PF_BACK_PID" 2>/dev/null || true
 
             if kubectl get namespace monitoring &>/dev/null; then
               kubectl apply --validate=false -f "${K8S_DIR}/60-monitoring.yaml" || true
@@ -396,7 +390,6 @@ jobs:
             echo "=== HPA status ==="
             kubectl get hpa -n "$NAMESPACE"
 
-            echo "=== Production smoke tests PASSED ==="
             echo "=== Production deploy complete — ${IMAGE_TAG} ==="
 
       # ── Rollback on failure ────────────────────────────────────────────────
@@ -420,7 +413,6 @@ jobs:
 
       - name: Create GitHub issue on failure
         if: failure()
-        continue-on-error: true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -437,7 +429,7 @@ jobs:
                 `**Time:** ${new Date().toISOString()}`,
                 '',
                 '### What happened',
-                'Production deployment failed. Previous version has been rolled back.',
+                'Production deployment failed after 3 self-heal attempts. Previous version has been rolled back.',
                 '',
                 '### Action required',
                 '1. Check the workflow run logs above',

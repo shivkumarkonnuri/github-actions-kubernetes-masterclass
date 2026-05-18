@@ -53,17 +53,31 @@ resource "aws_vpc_security_group_ingress_rule" "ssh" {
   })
 }
 
-# App port — kind maps NodePort 30080 → hostPort var.app_port (8888)
+# Production frontend — kind maps NodePort 30080 → hostPort 8888
 resource "aws_vpc_security_group_ingress_rule" "app" {
   security_group_id = aws_security_group.kind_node.id
-  description       = "SkillPulse frontend via kind NodePort"
+  description       = "SkillPulse production frontend NodePort 30080 to hostPort 8888"
   from_port         = var.app_port
   to_port           = var.app_port
   ip_protocol       = "tcp"
   cidr_ipv4         = var.my_ip
 
   tags = merge(local.common_tags, {
-    Name = "${local.sg_name}-app"
+    Name = "${local.sg_name}-app-prod"
+  })
+}
+
+# Staging frontend — kind maps NodePort 30081 → hostPort 8889
+resource "aws_vpc_security_group_ingress_rule" "app_staging" {
+  security_group_id = aws_security_group.kind_node.id
+  description       = "SkillPulse staging frontend NodePort 30081 to hostPort 8889"
+  from_port         = var.staging_port
+  to_port           = var.staging_port
+  ip_protocol       = "tcp"
+  cidr_ipv4         = var.my_ip
+
+  tags = merge(local.common_tags, {
+    Name = "${local.sg_name}-app-staging"
   })
 }
 
