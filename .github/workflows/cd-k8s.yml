@@ -156,8 +156,9 @@ jobs:
             kubectl apply --validate=false \
               -f "${K8S_DIR}/10-mysql.yaml" \
               -f "${K8S_DIR}/20-backend.yaml" \
-              -f "${K8S_DIR}/staging/30-frontend.yaml" \
               -n "$NAMESPACE"
+            sed 's/nodePort: 30080/nodePort: 30081/' "${K8S_DIR}/30-frontend.yaml" \
+              | kubectl apply --validate=false -n "$NAMESPACE" -f -
 
             echo "Waiting for pods..."
             sleep 20
@@ -459,5 +460,3 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
-
-
