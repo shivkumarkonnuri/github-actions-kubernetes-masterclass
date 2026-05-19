@@ -1,0 +1,16 @@
+# Patterns to ignore when building Helm packages
+# Windows metadata files created when unzipping downloads
+*:Zone.Identifier
+*.Zone.Identifier
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+
+# Editor backups
+*.bak
+*.tmp
+*.swp
+*~

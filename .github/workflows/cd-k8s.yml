@@ -25,6 +25,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Fix line endings and remove Zone.Identifier files
+        run: |
+          # Remove Windows Zone.Identifier metadata files (created when unzipping on Windows)
+          find k8s/helm -name "*:Zone.Identifier" -delete 2>/dev/null || true
+          # Normalize CRLF → LF on all Helm chart files
+          find k8s/helm -type f \( -name "*.yaml" -o -name "*.yml" -o -name "*.tpl" \) \
+            -exec sed -i 's/\r//' {} +
+          echo "Line endings fixed."
+
       - name: Copy Helm chart to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -90,6 +99,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Fix line endings and remove Zone.Identifier files
+        run: |
+          find k8s/helm -name "*:Zone.Identifier" -delete 2>/dev/null || true
+          find k8s/helm -type f \( -name "*.yaml" -o -name "*.yml" -o -name "*.tpl" \) \
+            -exec sed -i 's/\r//' {} +
+          echo "Line endings fixed."
 
       - name: Copy Helm chart to EC2
         uses: appleboy/scp-action@v0.1.7
@@ -248,6 +264,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Fix line endings and remove Zone.Identifier files
+        run: |
+          find k8s/helm -name "*:Zone.Identifier" -delete 2>/dev/null || true
+          find k8s/helm -type f \( -name "*.yaml" -o -name "*.yml" -o -name "*.tpl" \) \
+            -exec sed -i 's/\r//' {} +
+          echo "Line endings fixed."
 
       - name: Copy Helm chart to EC2
         uses: appleboy/scp-action@v0.1.7
