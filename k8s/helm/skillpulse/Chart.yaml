@@ -1,0 +1,13 @@
+apiVersion: v2
+name: skillpulse
+description: SkillPulse full-stack application — backend, frontend, MySQL
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - skillpulse
+  - go
+  - nginx
+  - mysql
+maintainers:
+  - name: SkillPulse Team

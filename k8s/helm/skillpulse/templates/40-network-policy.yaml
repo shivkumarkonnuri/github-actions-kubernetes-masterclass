@@ -1,3 +1,4 @@
+{{- if .Values.networkPolicy.enabled }}
 ---
 # Default deny: no pod in the namespace can receive traffic unless
 # explicitly permitted by a NetworkPolicy below.
@@ -5,17 +6,22 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny-all
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
 spec:
-  podSelector: {}   # matches every pod in the namespace
+  podSelector: {}
   policyTypes:
     - Ingress
     - Egress
 ---
-# Allow frontend → backend on port 8080 only
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-frontend-to-backend
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
 spec:
   podSelector:
     matchLabels:
@@ -31,11 +37,13 @@ spec:
         - protocol: TCP
           port: 8080
 ---
-# Allow backend → mysql on port 3306 only
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-backend-to-mysql
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
 spec:
   podSelector:
     matchLabels:
@@ -51,11 +59,13 @@ spec:
         - protocol: TCP
           port: 3306
 ---
-# Allow backend egress to mysql (needed in addition to mysql ingress rule)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-backend-egress-mysql
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
 spec:
   podSelector:
     matchLabels:
@@ -70,18 +80,19 @@ spec:
       ports:
         - protocol: TCP
           port: 3306
-    # Allow DNS resolution inside the cluster
     - ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
 ---
-# Allow frontend egress to backend
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-frontend-egress-backend
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
 spec:
   podSelector:
     matchLabels:
@@ -96,18 +107,19 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
-    # Allow DNS resolution
     - ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
 ---
-# Allow NodePort ingress to frontend from outside the cluster
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-external-to-frontend
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
 spec:
   podSelector:
     matchLabels:
@@ -119,11 +131,13 @@ spec:
         - protocol: TCP
           port: 8080
 ---
-# Allow NodePort ingress to backend from outside the cluster (for smoke tests)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-external-to-backend
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
 spec:
   podSelector:
     matchLabels:
@@ -134,3 +148,4 @@ spec:
     - ports:
         - protocol: TCP
           port: 8080
+{{- end }}

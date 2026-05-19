@@ -1,0 +1,80 @@
+# values.yaml — Production defaults
+# Override per environment with: helm upgrade ... -f values-staging.yaml
+# Secrets are NEVER stored here. They are injected at deploy time via --set
+# from GitHub Actions secrets (MYSQL_ROOT_PASSWORD, MYSQL_DATABASE, etc.)
+
+# ── Namespace ─────────────────────────────────────────────────────────────────
+namespace: skillpulse
+
+# ── Image ─────────────────────────────────────────────────────────────────────
+image:
+  # dockerUser is set at deploy time: --set image.dockerUser=<DOCKERHUB_USERNAME>
+  dockerUser: ""
+  # tag is set at deploy time:       --set image.tag=<SHA7>
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# ── MySQL ─────────────────────────────────────────────────────────────────────
+mysql:
+  image: mysql:8.4
+  storage: 1Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# ── Backend ───────────────────────────────────────────────────────────────────
+backend:
+  replicas: 2            # HA baseline; HPA scales up from here
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  hpa:
+    minReplicas: 2
+    maxReplicas: 5
+    cpuUtilization: 60
+    memoryUtilization: 75
+
+# ── Frontend ──────────────────────────────────────────────────────────────────
+frontend:
+  replicas: 2            # HA baseline
+  # nodePort used by the kind NodePort service.
+  # Production: 30080 → hostPort 8888 → http://<EC2-IP>:8888
+  nodePort: 30080
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+  hpa:
+    minReplicas: 2
+    maxReplicas: 4
+    cpuUtilization: 70
+
+# ── Network policies ──────────────────────────────────────────────────────────
+networkPolicy:
+  enabled: true
+
+# ── Pod Disruption Budgets ────────────────────────────────────────────────────
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# ── Monitoring (requires prometheus-operator) ─────────────────────────────────
+monitoring:
+  enabled: false         # enable when kube-prometheus-stack is installed
+
+# ── Smoke-test access mode ────────────────────────────────────────────────────
+# production  → port-forward (runs inside the SSH session)
+# staging     → docker exec on kind control-plane (direct CNI access)
+smokeTest:
+  mode: portforward

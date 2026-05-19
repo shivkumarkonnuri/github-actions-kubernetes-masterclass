@@ -12,7 +12,6 @@ permissions:
 jobs:
 
   # ── Job 1: Create kind cluster if not exists ──────────────────────────────
-  # Runs first — staging and production both depend on this
   cluster-setup:
     name: Ensure kind cluster exists
     if: |
@@ -26,16 +25,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Copy k8s manifests to EC2
+      - name: Copy Helm chart to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
           host:     ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key:      ${{ secrets.EC2_SSH_KEY }}
-          source:   "k8s/"
+          source:   "k8s/helm/"
           target:   "~/skillpulse"
 
-      - name: Create kind cluster if not exists
+      - name: Create kind cluster + install Helm if not present
         uses: appleboy/ssh-action@v1
         with:
           host:     ${{ secrets.EC2_HOST }}
@@ -48,6 +47,14 @@ jobs:
             CLUSTER=sp-cluster
             K8S_DIR=~/skillpulse/k8s
 
+            # ── Install Helm if missing ──────────────────────────────────────
+            if ! command -v helm &>/dev/null; then
+              echo "Installing Helm..."
+              curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+            fi
+            echo "Helm $(helm version --short)"
+
+            # ── Create kind cluster if missing ───────────────────────────────
             if kind get clusters 2>/dev/null | grep -q "^${CLUSTER}$"; then
               echo "Cluster '${CLUSTER}' already exists — skipping creation"
             else
@@ -74,7 +81,6 @@ jobs:
             echo "Cluster ready."
 
   # ── Job 2: Staging deploy ─────────────────────────────────────────────────
-  # Runs after cluster exists — deploys to skillpulse-staging namespace
   deploy-staging:
     name: Deploy to staging namespace
     needs: cluster-setup
@@ -85,16 +91,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Copy k8s manifests to EC2
+      - name: Copy Helm chart to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
           host:     ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key:      ${{ secrets.EC2_SSH_KEY }}
-          source:   "k8s/"
+          source:   "k8s/helm/"
           target:   "~/skillpulse-staging"
 
-      - name: Deploy to staging namespace
+      - name: Deploy to staging namespace via Helm
         uses: appleboy/ssh-action@v1
         env:
           IMAGE_TAG:           ${{ github.event.workflow_run.head_sha }}
@@ -114,12 +120,12 @@ jobs:
 
             CLUSTER=sp-cluster
             NAMESPACE=skillpulse-staging
-            K8S_DIR=~/skillpulse-staging/k8s
+            CHART_DIR=~/skillpulse-staging/k8s/helm/skillpulse
             IMAGE_TAG="${IMAGE_TAG::7}"
 
             echo "=== Staging deploy: ${IMAGE_TAG} ==="
 
-            # Pull and load images into kind nodes
+            # ── Pull and load images into kind nodes ─────────────────────────
             echo "Pulling images..."
             docker pull "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}" &
             docker pull "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" &
@@ -130,11 +136,12 @@ jobs:
             kind load docker-image "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" --name "$CLUSTER" &
             wait
 
-            # Create namespace
+            # ── Inject DB secret (idempotent) ────────────────────────────────
+            # Helm does not manage secrets so they are never committed to the chart.
+            # --dry-run=client | kubectl apply makes this safe to re-run.
             kubectl create namespace "$NAMESPACE" \
               --dry-run=client -o yaml | kubectl apply -f -
 
-            # Inject DB secret
             kubectl create secret generic skillpulse-db \
               --namespace="$NAMESPACE" \
               --from-literal=MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
@@ -144,54 +151,46 @@ jobs:
               --save-config \
               --dry-run=client -o yaml | kubectl apply -f -
 
-            # Pin image tags
-            sed -i \
-              "s|image: .*/skillpulse-backend:.*|image: ${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}|" \
-              "${K8S_DIR}/20-backend.yaml"
-            sed -i \
-              "s|image: .*/skillpulse-frontend:.*|image: ${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}|" \
-              "${K8S_DIR}/30-frontend.yaml"
+            # ── Helm upgrade (idempotent install-or-upgrade) ─────────────────
+            # -f values-staging.yaml  → namespace=skillpulse-staging,
+            #                           nodePort=30081, replicas=1, etc.
+            # --set image.tag         → pins the exact 7-char SHA
+            # --set image.dockerUser  → injects DockerHub username from secrets
+            # --atomic                → rolls back automatically on failure
+            # --timeout               → matches legacy command_timeout
+            helm upgrade --install skillpulse "$CHART_DIR" \
+              --namespace "$NAMESPACE" \
+              --create-namespace \
+              -f "${CHART_DIR}/values-staging.yaml" \
+              --set image.tag="${IMAGE_TAG}" \
+              --set image.dockerUser="${DOCKER_USER}" \
+              --atomic \
+              --timeout 10m \
+              --wait
 
-            # Apply manifests
-            # Frontend nodePort is set dynamically per environment:
-            #   Staging:    30081 → hostPort 8889 → http://<EC2-IP>:8889
-            #   Production: 30080 → hostPort 8888 → http://<EC2-IP>:8888
-            kubectl apply --validate=false \
-              -f "${K8S_DIR}/10-mysql.yaml" \
-              -f "${K8S_DIR}/20-backend.yaml" \
-              -n "$NAMESPACE"
-            # Remove any existing nodePort then inject 30081 for staging
-            sed '/nodePort:/d' "${K8S_DIR}/30-frontend.yaml" \
-              | sed '/port: 8080/{n;s/.*/      nodePort: 30081/;t;s/$/\n      nodePort: 30081/}' \
-              | kubectl apply --validate=false -n "$NAMESPACE" -f -
-
-            echo "Waiting for pods..."
-            sleep 20
-
+            # ── Rollout status ───────────────────────────────────────────────
             kubectl rollout status statefulset/mysql  -n "$NAMESPACE" --timeout=300s
             kubectl rollout status deployment/backend  -n "$NAMESPACE" --timeout=300s
             kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=180s
 
-            # Smoke tests using docker exec on kind control-plane container
-            # control-plane has direct CNI access to all pod IPs across all nodes
-            # Pod IP is fetched fresh inside each retry loop to handle new deployments
+            # ── Smoke tests (staging: docker exec → direct CNI pod access) ───
+            # The kind control-plane container can reach all pod IPs directly.
+            # curl is available in kindest/node images; || true prevents leaking.
 
-            # Smoke tests using curl via docker exec on kind control-plane container
-            # control-plane has direct CNI access to all pod IPs across all nodes
-            # curl is available in kindest/node images, || true prevents exit code leaking
-
-            # Backend smoke test
             echo "Running backend smoke test..."
             BACKEND_PASSED=false
             for i in $(seq 1 6); do
-              BACKEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=backend                 -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo "")
+              BACKEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=backend \
+                -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo "")
               echo "Attempt $i: backend pod IP = $BACKEND_IP"
               if [ -z "$BACKEND_IP" ]; then
                 echo "No pod IP yet — retrying in 5s..."
                 sleep 5
                 continue
               fi
-              STATUS=$(docker exec sp-cluster-control-plane                 curl -s -o /dev/null -w "%{http_code}" --max-time 5                 "http://${BACKEND_IP}:8080/health" || true)
+              STATUS=$(docker exec sp-cluster-control-plane \
+                curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+                "http://${BACKEND_IP}:8080/health" || true)
               echo "Attempt $i: HTTP $STATUS"
               if [ "$STATUS" = "200" ]; then
                 echo "STAGING backend smoke test PASSED"
@@ -207,18 +206,20 @@ jobs:
               exit 1
             fi
 
-            # Frontend smoke test
             echo "Running frontend smoke test..."
             FRONTEND_PASSED=false
             for i in $(seq 1 6); do
-              FRONTEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=frontend                 -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo "")
+              FRONTEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=frontend \
+                -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo "")
               echo "Attempt $i: frontend pod IP = $FRONTEND_IP"
               if [ -z "$FRONTEND_IP" ]; then
                 echo "No pod IP yet — retrying in 5s..."
                 sleep 5
                 continue
               fi
-              FRONT_STATUS=$(docker exec sp-cluster-control-plane                 curl -s -o /dev/null -w "%{http_code}" --max-time 5                 "http://${FRONTEND_IP}:8080" || true)
+              FRONT_STATUS=$(docker exec sp-cluster-control-plane \
+                curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+                "http://${FRONTEND_IP}:8080" || true)
               echo "Attempt $i: HTTP $FRONT_STATUS"
               if [ "$FRONT_STATUS" = "200" ]; then
                 echo "STAGING frontend smoke test PASSED"
@@ -237,7 +238,6 @@ jobs:
             echo "=== Staging deploy complete: ${IMAGE_TAG} ==="
 
   # ── Job 3: Production deploy ──────────────────────────────────────────────
-  # Runs only after staging passes
   kind-deploy:
     name: Deploy to production (kind cluster on EC2)
     needs: deploy-staging
@@ -249,16 +249,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Copy k8s manifests to EC2
+      - name: Copy Helm chart to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
           host:     ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key:      ${{ secrets.EC2_SSH_KEY }}
-          source:   "k8s/"
+          source:   "k8s/helm/"
           target:   "~/skillpulse"
 
-      - name: Deploy to kind cluster
+      - name: Deploy to production namespace via Helm
         uses: appleboy/ssh-action@v1
         env:
           IMAGE_TAG:           ${{ github.event.workflow_run.head_sha }}
@@ -278,13 +278,14 @@ jobs:
 
             CLUSTER=sp-cluster
             NAMESPACE=skillpulse
-            K8S_DIR=~/skillpulse/k8s
+            CHART_DIR=~/skillpulse/k8s/helm/skillpulse
             IMAGE_TAG="${IMAGE_TAG::7}"
 
             echo "=== Production deploy: ${IMAGE_TAG} ==="
 
             kubectl get nodes
 
+            # ── Pull and load images ─────────────────────────────────────────
             echo "Pulling images..."
             docker pull "${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}" &
             docker pull "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" &
@@ -295,14 +296,9 @@ jobs:
             kind load docker-image "${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}" --name "$CLUSTER" &
             wait
 
-            sed -i \
-              "s|image: .*/skillpulse-backend:.*|image: ${DOCKER_USER}/skillpulse-backend:${IMAGE_TAG}|" \
-              "${K8S_DIR}/20-backend.yaml"
-            sed -i \
-              "s|image: .*/skillpulse-frontend:.*|image: ${DOCKER_USER}/skillpulse-frontend:${IMAGE_TAG}|" \
-              "${K8S_DIR}/30-frontend.yaml"
-
-            kubectl apply --validate=false -f "${K8S_DIR}/00-namespace.yaml"
+            # ── Inject DB secret (idempotent) ────────────────────────────────
+            kubectl create namespace "$NAMESPACE" \
+              --dry-run=client -o yaml | kubectl apply -f -
 
             kubectl create secret generic skillpulse-db \
               --namespace="$NAMESPACE" \
@@ -313,21 +309,21 @@ jobs:
               --save-config \
               --dry-run=client -o yaml | kubectl apply -f -
 
-            # Remove any existing nodePort then inject 30080 for production
-            sed '/nodePort:/d' "${K8S_DIR}/30-frontend.yaml" \
-              | sed '/port: 8080/{n;s/.*/      nodePort: 30080/;t;s/$/\n      nodePort: 30080/}' \
-              > /tmp/frontend-prod.yaml
-            kubectl apply --validate=false \
-              -f "${K8S_DIR}/10-mysql.yaml" \
-              -f "${K8S_DIR}/20-backend.yaml" \
-              -f /tmp/frontend-prod.yaml \
-              -f "${K8S_DIR}/40-network-policy.yaml" \
-              -f "${K8S_DIR}/50-pdb.yaml" \
-              -f "${K8S_DIR}/80-hpa.yaml"
+            # ── Helm upgrade (production defaults from values.yaml) ───────────
+            # values.yaml sets: namespace=skillpulse, nodePort=30080,
+            #                   backend.replicas=2, frontend.replicas=2,
+            #                   networkPolicy.enabled=true, pdb.enabled=true
+            helm upgrade --install skillpulse "$CHART_DIR" \
+              --namespace "$NAMESPACE" \
+              --create-namespace \
+              -f "${CHART_DIR}/values.yaml" \
+              --set image.tag="${IMAGE_TAG}" \
+              --set image.dockerUser="${DOCKER_USER}" \
+              --atomic \
+              --timeout 20m \
+              --wait
 
-            echo "Waiting for pods..."
-            sleep 20
-
+            # ── Rollout status ───────────────────────────────────────────────
             kubectl rollout status statefulset/mysql -n "$NAMESPACE" --timeout=300s
 
             kubectl rollout status deployment/backend  -n "$NAMESPACE" --timeout=300s &
@@ -336,6 +332,7 @@ jobs:
 
             kubectl get pods,svc,endpoints -n "$NAMESPACE" -o wide
 
+            # ── Smoke tests (production: port-forward) ───────────────────────
             smoke_test() {
               local SERVICE=$1
               local URL=$2
@@ -373,7 +370,6 @@ jobs:
               return 1
             }
 
-            # Frontend smoke test
             kubectl port-forward svc/frontend 8888:8080 -n "$NAMESPACE" &
             PF_FRONT_PID=$!
             sleep 5
@@ -383,7 +379,6 @@ jobs:
             fi
             kill "$PF_FRONT_PID" 2>/dev/null || true
 
-            # Backend smoke test
             kubectl port-forward svc/backend 8080:8080 -n "$NAMESPACE" &
             PF_BACK_PID=$!
             sleep 5
@@ -393,8 +388,18 @@ jobs:
             fi
             kill "$PF_BACK_PID" 2>/dev/null || true
 
-            if kubectl get namespace monitoring &>/dev/null; then
-              kubectl apply --validate=false -f "${K8S_DIR}/60-monitoring.yaml" || true
+            # ── Optional: apply monitoring if prometheus-operator is present ─
+            if kubectl api-resources | grep -q servicemonitors; then
+              helm upgrade --install skillpulse "$CHART_DIR" \
+                --namespace "$NAMESPACE" \
+                -f "${CHART_DIR}/values.yaml" \
+                --set image.tag="${IMAGE_TAG}" \
+                --set image.dockerUser="${DOCKER_USER}" \
+                --set monitoring.enabled=true \
+                --reuse-values \
+                --atomic \
+                --timeout 5m \
+                --wait || true
             fi
 
             echo "=== HPA status ==="
@@ -413,11 +418,9 @@ jobs:
           command_timeout: 5m
           script: |
             NAMESPACE=skillpulse
-            echo "Rolling back..."
-            kubectl rollout undo deployment/backend  -n "$NAMESPACE" || true
-            kubectl rollout undo deployment/frontend -n "$NAMESPACE" || true
-            kubectl rollout status deployment/backend  -n "$NAMESPACE" --timeout=60s || true
-            kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=60s || true
+            echo "Rolling back Helm release..."
+            # helm rollback is atomic: reverts ALL resources to the last good revision
+            helm rollback skillpulse --namespace "$NAMESPACE" --wait --timeout 3m || true
             echo "Rollback complete"
             kubectl get pods -n "$NAMESPACE" -o wide
 
@@ -439,7 +442,7 @@ jobs:
                 `**Time:** ${new Date().toISOString()}`,
                 '',
                 '### What happened',
-                'Production deployment failed after 3 self-heal attempts. Previous version has been rolled back.',
+                'Production deployment failed after 3 self-heal attempts. Previous Helm revision has been rolled back.',
                 '',
                 '### Action required',
                 '1. Check the workflow run logs above',
@@ -461,7 +464,7 @@ jobs:
                 "color": "#FF0000",
                 "fields": [
                   { "title": "Commit", "value": "${{ github.event.workflow_run.head_sha }}", "short": true },
-                  { "title": "Status", "value": "Rolled back to previous version", "short": true },
+                  { "title": "Status", "value": "Rolled back to previous Helm revision", "short": true },
                   { "title": "Logs",   "value": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}", "short": false }
                 ]
               }]

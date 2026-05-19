@@ -1,16 +1,18 @@
----
-# Kyverno ClusterPolicies — Item 5
-# Install Kyverno first:
-#   kubectl create -f https://github.com/kyverno/kyverno/releases/latest/download/install.yaml
-#
-# These policies are enforced at admission time — the cluster rejects
-# non-compliant manifests BEFORE they are scheduled. Self-enforcing security.
+{{/*
+  70-kyverno-policies.yaml
+  ClusterPolicies are cluster-scoped resources — they don't live in a namespace.
+  They are applied only in the production release (install Kyverno first):
+    kubectl create -f https://github.com/kyverno/kyverno/releases/latest/download/install.yaml
 
+  The namespace matcher is templated so staging and production each enforce
+  policies only within their own namespace.
+*/}}
+---
 # Policy 1: Containers must not run as root
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: require-non-root
+  name: require-non-root-{{ .Values.namespace }}
   annotations:
     policies.kyverno.io/title: Require Non-Root Containers
     policies.kyverno.io/description: >
@@ -25,7 +27,7 @@ spec:
         any:
           - resources:
               kinds: [Pod]
-              namespaces: [skillpulse]
+              namespaces: [{{ .Values.namespace }}]
       validate:
         message: "Containers must not run as root (runAsNonRoot: true required)"
         pattern:
@@ -38,7 +40,7 @@ spec:
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: require-drop-all-capabilities
+  name: require-drop-all-capabilities-{{ .Values.namespace }}
   annotations:
     policies.kyverno.io/title: Require Drop All Capabilities
     policies.kyverno.io/description: >
@@ -52,7 +54,7 @@ spec:
         any:
           - resources:
               kinds: [Pod]
-              namespaces: [skillpulse]
+              namespaces: [{{ .Values.namespace }}]
       validate:
         message: "All capabilities must be dropped: capabilities.drop must include ALL"
         pattern:
@@ -66,7 +68,7 @@ spec:
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: disallow-privilege-escalation
+  name: disallow-privilege-escalation-{{ .Values.namespace }}
   annotations:
     policies.kyverno.io/title: Disallow Privilege Escalation
 spec:
@@ -78,7 +80,7 @@ spec:
         any:
           - resources:
               kinds: [Pod]
-              namespaces: [skillpulse]
+              namespaces: [{{ .Values.namespace }}]
       validate:
         message: "allowPrivilegeEscalation must be set to false"
         pattern:
@@ -91,7 +93,7 @@ spec:
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: require-resource-limits
+  name: require-resource-limits-{{ .Values.namespace }}
   annotations:
     policies.kyverno.io/title: Require Resource Limits
     policies.kyverno.io/description: >
@@ -106,7 +108,7 @@ spec:
         any:
           - resources:
               kinds: [Pod]
-              namespaces: [skillpulse]
+              namespaces: [{{ .Values.namespace }}]
       validate:
         message: "CPU and memory limits must be specified for all containers"
         pattern:
@@ -117,11 +119,11 @@ spec:
                     cpu: "?*"
                     memory: "?*"
 ---
-# Policy 5: Latest image tag is forbidden — must use specific SHA or version
+# Policy 5: Latest image tag is forbidden
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: disallow-latest-tag
+  name: disallow-latest-tag-{{ .Values.namespace }}
   annotations:
     policies.kyverno.io/title: Disallow Latest Tag
     policies.kyverno.io/description: >
@@ -136,7 +138,7 @@ spec:
         any:
           - resources:
               kinds: [Pod]
-              namespaces: [skillpulse]
+              namespaces: [{{ .Values.namespace }}]
       validate:
         message: "Image tag ':latest' is not allowed. Use a specific version or SHA."
         pattern:

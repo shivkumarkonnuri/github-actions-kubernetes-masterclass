@@ -1,67 +1,68 @@
 ---
-# HorizontalPodAutoscaler — backend
-# Scales between 2–5 replicas based on CPU and memory.
-# Requires metrics-server running in the cluster.
-# For kind: metrics-server is enabled via kubeadmConfigPatches in kind-config.yaml.
+# HPA — backend
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: backend-hpa
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
     name: backend
-  minReplicas: 2
-  maxReplicas: 5
+  minReplicas: {{ .Values.backend.hpa.minReplicas }}
+  maxReplicas: {{ .Values.backend.hpa.maxReplicas }}
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 60   # scale out when avg CPU > 60%
+          averageUtilization: {{ .Values.backend.hpa.cpuUtilization }}
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: 75   # scale out when avg memory > 75%
+          averageUtilization: {{ .Values.backend.hpa.memoryUtilization }}
   behavior:
     scaleUp:
-      stabilizationWindowSeconds: 30   # react quickly to traffic spikes
+      stabilizationWindowSeconds: 30
       policies:
         - type: Pods
           value: 2
           periodSeconds: 30
     scaleDown:
-      stabilizationWindowSeconds: 120  # wait 2 min before scaling down
+      stabilizationWindowSeconds: 120
       policies:
         - type: Pods
           value: 1
           periodSeconds: 60
-
 ---
-# HorizontalPodAutoscaler — frontend
-# Nginx is stateless and cheap to scale; keep 2 minimum for HA.
+# HPA — frontend
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: frontend-hpa
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
     name: frontend
-  minReplicas: 2
-  maxReplicas: 4
+  minReplicas: {{ .Values.frontend.hpa.minReplicas }}
+  maxReplicas: {{ .Values.frontend.hpa.maxReplicas }}
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 70
+          averageUtilization: {{ .Values.frontend.hpa.cpuUtilization }}
   behavior:
     scaleUp:
       stabilizationWindowSeconds: 30

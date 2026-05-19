@@ -1,0 +1,37 @@
+# values-staging.yaml — Staging environment overrides
+# Applied on top of values.yaml:
+#   helm upgrade --install skillpulse ./k8s/helm/skillpulse \
+#     -f ./k8s/helm/skillpulse/values-staging.yaml \
+#     --set image.tag=${IMAGE_TAG} \
+#     --set image.dockerUser=${DOCKER_USER}
+
+# ── Namespace ─────────────────────────────────────────────────────────────────
+namespace: skillpulse-staging
+
+# ── Frontend ──────────────────────────────────────────────────────────────────
+frontend:
+  replicas: 1            # single replica is fine for staging
+  # Staging: 30081 → hostPort 8889 → http://<EC2-IP>:8889
+  nodePort: 30081
+  hpa:
+    minReplicas: 1
+    maxReplicas: 2
+    cpuUtilization: 70
+
+# ── Backend ───────────────────────────────────────────────────────────────────
+backend:
+  replicas: 1            # reduce cost in staging
+  hpa:
+    minReplicas: 1
+    maxReplicas: 2
+    cpuUtilization: 60
+    memoryUtilization: 75
+
+# ── Monitoring off in staging (no prometheus-operator) ───────────────────────
+monitoring:
+  enabled: false
+
+# ── Smoke-test access mode ────────────────────────────────────────────────────
+# staging uses docker exec on the kind control-plane for direct CNI pod access
+smokeTest:
+  mode: dockerexec

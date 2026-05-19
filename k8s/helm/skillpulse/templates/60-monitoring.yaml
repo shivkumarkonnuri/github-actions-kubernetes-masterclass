@@ -1,15 +1,14 @@
+{{- if .Values.monitoring.enabled }}
 ---
-# ServiceMonitor — Item 4
-# Tells Prometheus operator to scrape /metrics from the backend service.
-# Requires prometheus-operator to be installed in the cluster.
-# For kind: helm install prometheus prometheus-community/kube-prometheus-stack
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: backend
+  namespace: {{ .Values.namespace }}
   labels:
     app: backend
-    release: prometheus     # must match prometheusSelector in Prometheus CR
+    release: prometheus
+    app.kubernetes.io/managed-by: Helm
 spec:
   selector:
     matchLabels:
@@ -20,14 +19,14 @@ spec:
       interval: 15s
       scrapeTimeout: 10s
 ---
-# PrometheusRule — alerting rules for backend
-# Fires when error rate > 5% or p99 latency > 2s
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: backend-alerts
+  namespace: {{ .Values.namespace }}
   labels:
     release: prometheus
+    app.kubernetes.io/managed-by: Helm
 spec:
   groups:
     - name: skillpulse.backend
@@ -35,20 +34,20 @@ spec:
       rules:
         - alert: HighErrorRate
           expr: |
-            sum(rate(gin_requests_total{namespace="skillpulse",status=~"5.."}[5m]))
+            sum(rate(gin_requests_total{namespace="{{ .Values.namespace }}",status=~"5.."}[5m]))
             /
-            sum(rate(gin_requests_total{namespace="skillpulse"}[5m])) > 0.05
+            sum(rate(gin_requests_total{namespace="{{ .Values.namespace }}"}[5m])) > 0.05
           for: 2m
           labels:
             severity: warning
           annotations:
             summary: "High error rate on SkillPulse backend"
-            description: "Error rate is {{ $value | humanizePercentage }} over last 5 minutes"
+            description: "Error rate is {{ "{{" }} $value | humanizePercentage {{ "}}" }} over last 5 minutes"
 
         - alert: HighLatency
           expr: |
             histogram_quantile(0.99,
-              sum(rate(gin_request_duration_seconds_bucket{namespace="skillpulse"}[5m]))
+              sum(rate(gin_request_duration_seconds_bucket{namespace="{{ .Values.namespace }}"}[5m]))
               by (le)
             ) > 2
           for: 2m
@@ -56,4 +55,5 @@ spec:
             severity: warning
           annotations:
             summary: "High p99 latency on SkillPulse backend"
-            description: "p99 latency is {{ $value }}s"
+            description: "p99 latency is {{ "{{" }} $value {{ "}}" }}s"
+{{- end }}

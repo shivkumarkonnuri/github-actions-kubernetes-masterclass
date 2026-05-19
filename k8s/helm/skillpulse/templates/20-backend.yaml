@@ -3,8 +3,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: backend
+  namespace: {{ .Values.namespace }}
   labels:
     app: backend
+    app.kubernetes.io/managed-by: Helm
 spec:
   type: NodePort
   selector:
@@ -13,14 +15,17 @@ spec:
     - name: http
       port: 8080
       targetPort: 8080
-
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: backend
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: backend
+    app.kubernetes.io/managed-by: Helm
 spec:
-  replicas: 2          # minimum 2 so HPA starts from a HA baseline
+  replicas: {{ .Values.backend.replicas }}
   selector:
     matchLabels:
       app: backend
@@ -28,20 +33,17 @@ spec:
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 1
-      maxUnavailable: 0  # zero-downtime: always keep full capacity during rollout
+      maxUnavailable: 0   # zero-downtime rollout
   template:
     metadata:
       labels:
         app: backend
       annotations:
-        # Prometheus scrape annotations (fallback if ServiceMonitor is not installed)
         prometheus.io/scrape: "true"
         prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
-      # Pod-level: no service account token auto-mounted
       automountServiceAccountToken: false
-      # Graceful shutdown: give the app 35s to drain (matches server timeout of 30s + buffer)
       terminationGracePeriodSeconds: 35
       securityContext:
         runAsNonRoot: true
@@ -52,8 +54,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: backend
-          image: shivkumarkonnuri/skillpulse-backend:81a7e1a
-          imagePullPolicy: IfNotPresent
+          image: {{ .Values.image.dockerUser }}/skillpulse-backend:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
               containerPort: 8080
@@ -80,12 +82,7 @@ spec:
                   name: skillpulse-db
                   key: MYSQL_DATABASE
           resources:
-            requests:
-              cpu: 100m
-              memory: 64Mi
-            limits:
-              cpu: 250m
-              memory: 128Mi
+            {{- toYaml .Values.backend.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -93,34 +90,21 @@ spec:
             runAsUser: 1000
             capabilities:
               drop: ["ALL"]
-
-          # ── startupProbe ──────────────────────────────────────────────────
-          # Gives the app up to 60s (30 × 2s) to start before liveness kicks in.
-          # Prevents liveness from killing the pod while MySQL is still booting.
-          # Once startupProbe passes, liveness and readiness take over.
           startupProbe:
             httpGet:
               path: /health
               port: 8080
-            failureThreshold: 30   # 30 attempts × 2s = 60s maximum startup time
+            failureThreshold: 30
             periodSeconds: 2
             timeoutSeconds: 5
-
-          # ── livenessProbe ─────────────────────────────────────────────────
-          # Only active AFTER startupProbe passes.
-          # Restarts the pod if the app hangs or deadlocks.
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
-            initialDelaySeconds: 60   # startupProbe handles the delay
+            initialDelaySeconds: 60
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
-
-          # ── readinessProbe ────────────────────────────────────────────────
-          # Removes pod from Service endpoints if it can't serve traffic.
-          # Conservative: 5s period means traffic is re-routed quickly.
           readinessProbe:
             httpGet:
               path: /health
