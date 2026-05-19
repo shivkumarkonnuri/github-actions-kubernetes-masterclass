@@ -184,6 +184,17 @@ jobs:
             # this block is a no-op on every subsequent deploy.
             echo "Adopting existing resources into Helm ownership..."
             RELEASE=skillpulse
+
+            # Adopt the namespace itself (cluster-scoped — no -n flag)
+            kubectl annotate namespace "$NAMESPACE" \
+              "meta.helm.sh/release-name=${RELEASE}" \
+              "meta.helm.sh/release-namespace=${NAMESPACE}" \
+              --overwrite 2>/dev/null || true
+            kubectl label namespace "$NAMESPACE" \
+              "app.kubernetes.io/managed-by=Helm" \
+              --overwrite 2>/dev/null || true
+
+            # Adopt all namespaced resources
             for RESOURCE_TYPE in configmap service statefulset deployment networkpolicy poddisruptionbudget horizontalpodautoscaler; do
               kubectl get "$RESOURCE_TYPE" -n "$NAMESPACE" -o name 2>/dev/null | while read RESOURCE; do
                 kubectl annotate "$RESOURCE" -n "$NAMESPACE" \
@@ -199,7 +210,6 @@ jobs:
 
             helm upgrade --install skillpulse "$CHART_DIR" \
               --namespace "$NAMESPACE" \
-              --create-namespace \
               -f "${CHART_DIR}/values-staging.yaml" \
               --set image.tag="${IMAGE_TAG}" \
               --set image.dockerUser="${DOCKER_USER}" \
@@ -369,6 +379,17 @@ jobs:
             # this block is a no-op on every subsequent deploy.
             echo "Adopting existing resources into Helm ownership..."
             RELEASE=skillpulse
+
+            # Adopt the namespace itself (cluster-scoped — no -n flag)
+            kubectl annotate namespace "$NAMESPACE" \
+              "meta.helm.sh/release-name=${RELEASE}" \
+              "meta.helm.sh/release-namespace=${NAMESPACE}" \
+              --overwrite 2>/dev/null || true
+            kubectl label namespace "$NAMESPACE" \
+              "app.kubernetes.io/managed-by=Helm" \
+              --overwrite 2>/dev/null || true
+
+            # Adopt all namespaced resources
             for RESOURCE_TYPE in configmap service statefulset deployment networkpolicy poddisruptionbudget horizontalpodautoscaler; do
               kubectl get "$RESOURCE_TYPE" -n "$NAMESPACE" -o name 2>/dev/null | while read RESOURCE; do
                 kubectl annotate "$RESOURCE" -n "$NAMESPACE" \
@@ -384,7 +405,6 @@ jobs:
 
             helm upgrade --install skillpulse "$CHART_DIR" \
               --namespace "$NAMESPACE" \
-              --create-namespace \
               -f "${CHART_DIR}/values.yaml" \
               --set image.tag="${IMAGE_TAG}" \
               --set image.dockerUser="${DOCKER_USER}" \
