@@ -73,6 +73,12 @@ pdb:
 monitoring:
   enabled: false         # enable when kube-prometheus-stack is installed
 
+# ── Kyverno policies (requires Kyverno CRDs) ──────────────────────────────────
+# Install Kyverno first:
+#   kubectl create -f https://github.com/kyverno/kyverno/releases/latest/download/install.yaml
+kyverno:
+  enabled: false         # enable when Kyverno is installed on the cluster
+
 # ── Smoke-test access mode ────────────────────────────────────────────────────
 # production  → port-forward (runs inside the SSH session)
 # staging     → docker exec on kind control-plane (direct CNI access)

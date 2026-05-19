@@ -1,3 +1,4 @@
+{{- if .Values.kyverno.enabled }}
 {{/*
   70-kyverno-policies.yaml
   ClusterPolicies are cluster-scoped resources — they don't live in a namespace.
@@ -145,3 +146,5 @@ spec:
           spec:
             containers:
               - image: "!*:latest"
+
+{{- end }}
