@@ -421,61 +421,70 @@ jobs:
 
             kubectl get pods,svc,endpoints -n "$NAMESPACE" -o wide
 
-            # ── Smoke tests (production: port-forward) ───────────────────────
-            smoke_test() {
-              local SERVICE=$1
-              local URL=$2
-              local MAX_HEAL=3
+            # ── Smoke tests (production: docker exec on kind control-plane) ──────
+            # port-forward uses the kubelet streaming API which requires TLS
+            # between the API server and kubelet — unreliable on kind clusters.
+            # docker exec gives direct CNI access to all pod IPs across all nodes,
+            # bypassing kubelet TLS entirely. Same approach as staging.
 
-              for HEAL in $(seq 1 $MAX_HEAL); do
-                echo "--- Smoke test attempt ${HEAL}/${MAX_HEAL} for ${SERVICE} ---"
-                PASSED=false
-
-                for POLL in $(seq 1 6); do
-                  STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
-                  if [ "$STATUS" = "200" ]; then
-                    echo "${SERVICE} smoke test PASSED — HTTP $STATUS"
-                    PASSED=true
-                    break
-                  fi
-                  echo "Poll ${POLL}/6: HTTP $STATUS — waiting 5s..."
-                  sleep 5
-                done
-
-                if [ "$PASSED" = "true" ]; then
-                  return 0
-                fi
-
-                if [ "$HEAL" -lt "$MAX_HEAL" ]; then
-                  echo "Restarting ${SERVICE}..."
-                  kubectl rollout restart deployment/"${SERVICE}" -n "$NAMESPACE" || true
-                  kubectl rollout status deployment/"${SERVICE}" -n "$NAMESPACE" --timeout=120s || true
-                  sleep 5
-                fi
-              done
-
-              kubectl describe pods -n "$NAMESPACE" -l "app=${SERVICE}" || true
-              kubectl logs -n "$NAMESPACE" -l "app=${SERVICE}" --tail=50 || true
-              return 1
-            }
-
-            kubectl port-forward svc/frontend 8888:8080 -n "$NAMESPACE" &
-            PF_FRONT_PID=$!
-            sleep 5
-            if ! smoke_test "frontend" "http://localhost:8888"; then
-              kill "$PF_FRONT_PID" 2>/dev/null || true
+            echo "Running backend smoke test..."
+            BACKEND_PASSED=false
+            for i in $(seq 1 6); do
+              BACKEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=backend \
+                -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo "")
+              echo "Attempt $i: backend pod IP = $BACKEND_IP"
+              if [ -z "$BACKEND_IP" ]; then
+                echo "No pod IP yet — retrying in 5s..."
+                sleep 5
+                continue
+              fi
+              STATUS=$(docker exec sp-cluster-control-plane \
+                curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+                "http://${BACKEND_IP}:8080/health" || true)
+              echo "Attempt $i: HTTP $STATUS"
+              if [ "$STATUS" = "200" ]; then
+                echo "PRODUCTION backend smoke test PASSED"
+                BACKEND_PASSED=true
+                break
+              fi
+              sleep 5
+            done
+            if [ "$BACKEND_PASSED" != "true" ]; then
+              echo "PRODUCTION backend smoke test FAILED"
+              kubectl get pods -n "$NAMESPACE" -o wide
+              kubectl describe pods -n "$NAMESPACE" -l app=backend || true
               exit 1
             fi
-            kill "$PF_FRONT_PID" 2>/dev/null || true
 
-            kubectl port-forward svc/backend 8080:8080 -n "$NAMESPACE" &
-            PF_BACK_PID=$!
-            sleep 5
-            if ! smoke_test "backend" "http://localhost:8080/health"; then
-              kill "$PF_BACK_PID" 2>/dev/null || true
+            echo "Running frontend smoke test..."
+            FRONTEND_PASSED=false
+            for i in $(seq 1 6); do
+              FRONTEND_IP=$(kubectl get pod -n "$NAMESPACE" -l app=frontend \
+                -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo "")
+              echo "Attempt $i: frontend pod IP = $FRONTEND_IP"
+              if [ -z "$FRONTEND_IP" ]; then
+                echo "No pod IP yet — retrying in 5s..."
+                sleep 5
+                continue
+              fi
+              FRONT_STATUS=$(docker exec sp-cluster-control-plane \
+                curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+                "http://${FRONTEND_IP}:8080" || true)
+              echo "Attempt $i: HTTP $FRONT_STATUS"
+              if [ "$FRONT_STATUS" = "200" ]; then
+                echo "PRODUCTION frontend smoke test PASSED"
+                FRONTEND_PASSED=true
+                break
+              fi
+              sleep 5
+            done
+            if [ "$FRONTEND_PASSED" != "true" ]; then
+              echo "PRODUCTION frontend smoke test FAILED"
+              kubectl get pods -n "$NAMESPACE" -o wide
               exit 1
             fi
-            kill "$PF_BACK_PID" 2>/dev/null || true
+
+            echo "=== Production smoke tests PASSED ===" 
 
             # ── Optional: apply monitoring if prometheus-operator is present ─
             if kubectl api-resources | grep -q servicemonitors; then
